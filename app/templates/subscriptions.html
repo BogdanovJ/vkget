@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <div>
+    <div class="eyebrow">TRACKED SOURCES</div>
+    <h1>SUBSCRIPTIONS</h1>
+  </div>
+  <a class="buttonlike" href="/add">+ ADD</a>
+</section>
+
+<section class="panel">
+{% for s in subs %}
+  <a class="row big" href="/subscriptions/{{ s.id }}">
+    <span>
+      <strong>{{ s.title }}</strong>
+      <small>LAST SCAN: {{ s.last_scan_at or "NEVER" }}</small>
+    </span>
+    <em>{{ "ON" if s.enabled else "OFF" }}</em>
+  </a>
+{% else %}
+  <p class="muted">NO SUBSCRIPTIONS.</p>
+{% endfor %}
+</section>
+{% endblock %}

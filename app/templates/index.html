@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <div>
+    <div class="eyebrow">MEDIA SUBSCRIPTION ENGINE</div>
+    <h1>STATUS BOARD</h1>
+  </div>
+  <span class="badge">MAX {{ max_height }}P</span>
+</section>
+
+<div class="stats">
+  <div class="stat"><b>{{ counts.subscriptions }}</b><span>SUBSCRIPTIONS</span></div>
+  <div class="stat"><b>{{ counts.queued }}</b><span>QUEUED</span></div>
+  <div class="stat"><b>{{ counts.downloading }}</b><span>ACTIVE</span></div>
+  <div class="stat"><b>{{ counts.completed }}</b><span>DONE</span></div>
+</div>
+
+{% if cooldown %}
+<div class="notice">GLOBAL COOLDOWN UNTIL {{ cooldown }}</div>
+{% endif %}
+
+<div class="grid">
+  <section class="panel">
+    <h2>SUBSCRIPTIONS</h2>
+    {% for s in subs %}
+      <a class="row" href="/subscriptions/{{ s.id }}">
+        <span>{{ s.title }}</span>
+        <small>{{ "ON" if s.enabled else "OFF" }}</small>
+      </a>
+    {% else %}
+      <p class="muted">NO SUBSCRIPTIONS YET.</p>
+    {% endfor %}
+  </section>
+
+  <section class="panel">
+    <h2>RECENT</h2>
+    {% for v in recent %}
+      <div class="row">
+        <span>
+          <strong>{{ v.title }}</strong>
+          <small>{{ v.channel }}</small>
+        </span>
+        <em class="status">{{ v.status }}</em>
+      </div>
+    {% else %}
+      <p class="muted">NOTHING DISCOVERED YET.</p>
+    {% endfor %}
+  </section>
+</div>
+{% endblock %}

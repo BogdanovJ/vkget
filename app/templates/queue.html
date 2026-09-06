@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <div>
+    <div class="eyebrow">WORK LIST</div>
+    <h1>QUEUE</h1>
+  </div>
+</section>
+
+<section class="panel">
+{% for v in videos %}
+  <div class="row big">
+    <span>
+      <strong>{{ v.title }}</strong>
+      <small>
+        {{ v.channel }} · ATTEMPT {{ v.attempts }} · NEXT {{ v.next_attempt_at or "NOW" }}
+      </small>
+      {% if v.last_error %}
+      <small class="error">{{ v.last_error[-180:] }}</small>
+      {% endif %}
+    </span>
+    <em class="status">{{ v.status }}</em>
+  </div>
+{% else %}
+  <p class="muted">QUEUE EMPTY.</p>
+{% endfor %}
+</section>
+{% endblock %}

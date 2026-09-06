@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vkget
+  namespace: vkget
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vkget
+  template:
+    metadata:
+      labels:
+        app: vkget
+    spec:
+      # IMPORTANT:
+      # Pin this workload to a node where /mnt/downloads is definitely mounted.
+      # Example:
+      # nodeSelector:
+      #   vkget-storage: "true"
+
+      containers:
+        - name: vkget
+          image: ghcr.io/YOUR_USER/vkget:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+
+          envFrom:
+            - configMapRef:
+                name: vkget
+            - secretRef:
+                name: vkget-secrets
+
+          volumeMounts:
+            - name: downloads
+              mountPath: /downloads
+            - name: cookies
+              mountPath: /config
+              readOnly: true
+
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 30
+
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+
+      volumes:
+        - name: downloads
+          hostPath:
+            path: /mnt/downloads
+            type: Directory
+        - name: cookies
+          secret:
+            secretName: vkget-cookies
+            defaultMode: 0400

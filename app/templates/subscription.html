@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <div>
+    <div class="eyebrow">SUBSCRIPTION #{{ sub.id }}</div>
+    <h1>{{ sub.title }}</h1>
+    <p class="muted">{{ sub.source_url }}</p>
+  </div>
+
+  <form method="post" action="/subscriptions/{{ sub.id }}/scan">
+    <button>SCAN NOW</button>
+  </form>
+</section>
+
+<section class="panel meta">
+  <span>INITIAL: LAST {{ sub.initial_last_n }}</span>
+  <span>MIN: {{ sub.min_duration_seconds // 60 }} MIN</span>
+  <span>FUTURE: {{ "YES" if sub.watch_future else "NO" }}</span>
+  <span>NEXT: {{ sub.next_scan_at or "—" }}</span>
+</section>
+
+<section class="panel">
+  <h2>CATALOGUE</h2>
+
+  {% for v in videos %}
+  <div class="row catalogue">
+    <span>
+      <strong>{{ v.title }}</strong>
+      <small>
+        {% if v.duration %}{{ (v.duration // 60) }}M {{ (v.duration % 60) }}S · {% endif %}
+        {{ v.status }}
+        {% if v.ignore_reason %} · {{ v.ignore_reason }}{% endif %}
+      </small>
+    </span>
+
+    <span class="actions">
+      {% if v.status.startswith("IGNORED") %}
+      <form method="post" action="/videos/{{ v.id }}/download">
+        <button class="small">DOWNLOAD</button>
+      </form>
+      {% elif v.status in ["QUEUED", "FAILED_TEMPORARY"] %}
+      <form method="post" action="/videos/{{ v.id }}/ignore">
+        <button class="small">IGNORE</button>
+      </form>
+      {% endif %}
+    </span>
+  </div>
+  {% else %}
+    <p class="muted">CATALOGUE EMPTY.</p>
+  {% endfor %}
+</section>
+{% endblock %}

@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}ADD · VKGET{% endblock %}
+{% block content %}
+<div class="grid">
+  <section class="panel">
+    <div class="eyebrow">TRACKED</div>
+    <h1>ADD SUBSCRIPTION</h1>
+
+    <form method="post" action="/subscriptions">
+      <label>PLAYLIST / CHANNEL URL</label>
+      <input name="url" required placeholder="https://vkvideo.ru/...">
+
+      <label>INITIAL IMPORT</label>
+      <select name="initial_last_n">
+        <option value="0">NONE</option>
+        <option value="1">LAST 1</option>
+        <option value="3" selected>LAST 3</option>
+        <option value="5">LAST 5</option>
+        <option value="10">LAST 10</option>
+      </select>
+
+      <label>MINIMUM LENGTH (MINUTES)</label>
+      <input type="number" name="min_duration_minutes" min="0" value="10">
+
+      <label>EXTRA STOP WORDS · ONE PER LINE</label>
+      <textarea name="stop_words" rows="7" placeholder="channel-specific words"></textarea>
+
+      <label class="check">
+        <input type="checkbox" name="watch_future" checked>
+        WATCH FUTURE VIDEOS
+      </label>
+
+      <button>SCAN + SAVE</button>
+    </form>
+  </section>
+
+  <section class="panel">
+    <div class="eyebrow">UNTRACKED</div>
+    <h1>ONE-OFF</h1>
+
+    <form method="post" action="/one-off">
+      <label>VIDEO URL</label>
+      <input name="url" required placeholder="https://vkvideo.ru/video...">
+      <p class="muted">DOWNLOAD ONCE. NO FUTURE TRACKING.</p>
+      <button>QUEUE VIDEO</button>
+    </form>
+  </section>
+</div>
+{% endblock %}

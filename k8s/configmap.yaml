@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vkget
+  namespace: vkget
+data:
+  DOWNLOAD_ROOT: /downloads
+  COOKIE_FILE: /config/cookies.txt
+  MAX_HEIGHT: "720"
+  DOWNLOAD_RATE: "500K"
+  MIN_GAP_MINUTES: "15"
+  MIN_GAP_MAX_MINUTES: "30"
+  DISCOVERY_INTERVAL_MIN_HOURS: "3"
+  DISCOVERY_INTERVAL_MAX_HOURS: "6"
