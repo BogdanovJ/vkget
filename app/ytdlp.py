@@ -4,6 +4,10 @@ import asyncio
 import json
 import os
 import re
+
+import shutil
+import tempfile
+
 from pathlib import Path
 
 from .config import settings
@@ -37,7 +41,13 @@ async def _run(args: list[str], timeout: int | None = None):
 def common_args() -> list[str]:
     args = ["/usr/local/bin/yt-dlp"]
     if os.path.exists(settings.cookie_file):
-        args += ["--cookies", settings.cookie_file]
+
+        runtime_cookie = os.path.join(
+            tempfile.gettempdir(),
+            "vkget-cookies.txt",
+        )
+        shutil.copy2(settings.cookie_file, runtime_cookie)
+        args += ["--cookies", runtime_cookie]
     return args
 
 async def inspect_url(url: str) -> dict:
