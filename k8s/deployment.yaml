@@ -18,8 +18,8 @@ spec:
       # IMPORTANT:
       # Pin this workload to a node where /mnt/downloads is definitely mounted.
       # Example:
-      # nodeSelector:
-      #   vkget-storage: "true"
+      nodeSelector:
+      vkget-storage: "true"
 
       containers:
         - name: vkget

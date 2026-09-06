@@ -83,6 +83,12 @@ def storage_ok():
     if not os.path.isdir(root) or not os.access(root, os.W_OK):
         return False
 
+    sentinel = os.path.join(root, ".vkget-share")
+    if not os.path.isfile(sentinel):
+        return False
+    if not os.access(root, os.W_OK):
+        return False
+    
     probe = os.path.join(root, ".vkget-write-test")
 
     try:
