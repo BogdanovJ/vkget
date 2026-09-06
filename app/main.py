@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+from urllib import request
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -53,9 +54,9 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
     cooldown = db.get(AppState, "global_cooldown_until")
 
     return templates.TemplateResponse(
-        "index.html",
-        {
-            "request": request,
+        request=request,
+        name="index.html",
+        context={
             "counts": counts,
             "recent": recent,
             "subs": subs,
@@ -70,14 +71,21 @@ def subscriptions(request: Request, db: Session = Depends(get_db)):
         select(Subscription).order_by(Subscription.created_at.desc())
     ).all()
 
+    # /subscriptions
     return templates.TemplateResponse(
-        "subscriptions.html",
-        {"request": request, "subs": subs},
+        request=request,
+        name="subscriptions.html",
+        context={"subs": subs},
     )
 
 @app.get("/add", response_class=HTMLResponse)
 def add_page(request: Request):
-    return templates.TemplateResponse("add.html", {"request": request})
+    # /add
+    return templates.TemplateResponse(
+        request=request,
+        name="add.html",
+        context={},
+    )
 
 @app.post("/subscriptions")
 async def add_subscription(
@@ -172,10 +180,11 @@ def subscription_detail(
         .limit(500)
     ).all()
 
+    # individual subscription page
     return templates.TemplateResponse(
-        "subscription.html",
-        {
-            "request": request,
+        request=request,
+        name="subscription.html",
+        context={
             "sub": sub,
             "videos": videos,
         },
@@ -239,9 +248,11 @@ def queue(request: Request, db: Session = Depends(get_db)):
         .limit(200)
     ).all()
 
+    # /queue
     return templates.TemplateResponse(
-        "queue.html",
-        {"request": request, "videos": videos},
+        request=request,
+        name="queue.html",
+        context={"videos": videos},
     )
 
 @app.get("/healthz")
