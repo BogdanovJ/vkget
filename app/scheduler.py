@@ -117,24 +117,6 @@ def recover_interrupted_downloads():
 
         db.commit()
 
-def recover_interrupted_downloads():
-    with SessionLocal() as db:
-        jobs = db.scalars(
-            select(Video).where(Video.status == "DOWNLOADING")
-        ).all()
-
-        if not jobs:
-            return
-
-        retry_at = now()
-
-        for job in jobs:
-            job.status = "FAILED_TEMPORARY"
-            job.last_error = "Download interrupted by application restart"
-            job.next_attempt_at = retry_at
-
-        db.commit()
-
 async def scan_subscription(subscription_id: int, initial: bool = False):
     with SessionLocal() as db:
         sub = db.get(Subscription, subscription_id)
