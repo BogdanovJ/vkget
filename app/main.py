@@ -14,7 +14,11 @@ from sqlalchemy.orm import Session
 from .config import settings
 from .db import Base, engine, get_db
 from .models import AppState, Subscription, Video
-from .scheduler import scan_subscription, scheduler_loop
+from .scheduler import (
+    recover_interrupted_downloads,
+    scan_subscription,
+    scheduler_loop,
+)
 from .ytdlp import inspect_url, normalize_vk_url
 
 app = FastAPI(title="VKGET")
@@ -24,6 +28,7 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 @app.on_event("startup")
 async def startup():
     Base.metadata.create_all(engine)
+    recover_interrupted_downloads()
     asyncio.create_task(scheduler_loop())
 
 @app.get("/", response_class=HTMLResponse)

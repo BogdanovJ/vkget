@@ -99,6 +99,42 @@ def storage_ok():
     except OSError:
         return False
 
+def recover_interrupted_downloads():
+    with SessionLocal() as db:
+        jobs = db.scalars(
+            select(Video).where(Video.status == "DOWNLOADING")
+        ).all()
+
+        if not jobs:
+            return
+
+        retry_at = now()
+
+        for job in jobs:
+            job.status = "FAILED_TEMPORARY"
+            job.last_error = "Download interrupted by application restart"
+            job.next_attempt_at = retry_at
+
+        db.commit()
+
+def recover_interrupted_downloads():
+    with SessionLocal() as db:
+        jobs = db.scalars(
+            select(Video).where(Video.status == "DOWNLOADING")
+        ).all()
+
+        if not jobs:
+            return
+
+        retry_at = now()
+
+        for job in jobs:
+            job.status = "FAILED_TEMPORARY"
+            job.last_error = "Download interrupted by application restart"
+            job.next_attempt_at = retry_at
+
+        db.commit()
+
 async def scan_subscription(subscription_id: int, initial: bool = False):
     with SessionLocal() as db:
         sub = db.get(Subscription, subscription_id)
@@ -259,6 +295,7 @@ async def run_one_download():
 
         job.status = "DOWNLOADING"
         job.attempts += 1
+        job.next_attempt_at = None
 
         video_id = job.id
         url = job.webpage_url
@@ -268,7 +305,26 @@ async def run_one_download():
 
         db.commit()
 
-    rc, final_path, log = await download_video(url, channel)
+    try:
+        rc, final_path, log = await download_video(url, channel)
+    except Exception as exc:
+        retry_at = retry_time(attempts, "TRANSIENT")
+
+        with SessionLocal() as db:
+            job = db.get(Video, video_id)
+            if job:
+                job.status = "FAILED_TEMPORARY"
+                job.last_error = f"{type(exc).__name__}: {exc}"[-4000:]
+                job.next_attempt_at = retry_at
+                db.commit()
+
+        await notify(
+            "⚠ VKGET\n"
+            f"{title}\n"
+            f"Download process failed: {type(exc).__name__}\n"
+            f"Next attempt: {retry_at:%Y-%m-%d %H:%M}"
+        )
+        return
 
     with SessionLocal() as db:
         job = db.get(Video, video_id)

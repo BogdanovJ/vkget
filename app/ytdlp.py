@@ -114,7 +114,7 @@ async def download_video(url: str, channel: str):
         url,
     ]
 
-    rc, out, err = await _run(args)
+    rc, out, err = await _run(args, timeout=4 * 60 * 60)
     lines = [x.strip() for x in out.splitlines() if x.strip()]
     final_path = lines[-1] if lines and rc == 0 else None
     return rc, final_path, (err + "\n" + out).strip()
