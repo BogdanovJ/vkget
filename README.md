@@ -13,13 +13,19 @@ Features:
 - randomized discovery/retry scheduling
 - MariaDB persistence
 - Telegram notifications
-- channel/uploader folder sorting
+- subscription folder sorting
 - `/mnt/downloads` host mount exposed as `/downloads`
 - minimal 16-bit-inspired UI
 
 ## Storage
 
 Kubernetes mounts the node's existing `/mnt/downloads` to `/downloads`.
+
+Subscription downloads go in one folder named after the subscription:
+
+`/downloads/{subscription}/{YYYY-MM-DD} - {title} [{id}].mp4`
+
+One-off downloads use the uploader name, or `_single`. Placeholder leftovers (`Subscription`, `Unknown`, `NA`) are never used as folder names. If the upload date is unknown, the date prefix is omitted instead of writing `NA`.
 
 ## Database
 

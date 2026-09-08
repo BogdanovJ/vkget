@@ -127,7 +127,7 @@ class DownloadNoticeTests(unittest.IsolatedAsyncioTestCase):
                 "upload_date": "20240115",
             }
 
-        async def fake_download(url, channel, title="", video_id="", upload_date=None):
+        async def fake_download(url, channel, title="", video_id="", upload_date=None, folder=None):
             download_kwargs.update(
                 {
                     "url": url,
@@ -135,6 +135,7 @@ class DownloadNoticeTests(unittest.IsolatedAsyncioTestCase):
                     "title": title,
                     "video_id": video_id,
                     "upload_date": upload_date,
+                    "folder": folder,
                 }
             )
             return (
@@ -166,6 +167,7 @@ class DownloadNoticeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(download_kwargs["title"], "Lecture 4 — Linear maps")
         self.assertEqual(download_kwargs["channel"], "Algebra")
+        self.assertEqual(download_kwargs["folder"], "Algebra")
         self.assertEqual(download_kwargs["upload_date"], "20240115")
         self.assertEqual(len(notices), 1)
         self.assertIn("Lecture 4 — Linear maps", notices[0])
@@ -214,9 +216,10 @@ class DownloadNoticeTests(unittest.IsolatedAsyncioTestCase):
                 "upload_date": kwargs.get("upload_date") or "",
             }
 
-        async def fake_download(url, channel, title="", video_id="", upload_date=None):
+        async def fake_download(url, channel, title="", video_id="", upload_date=None, folder=None):
             download_kwargs["channel"] = channel
             download_kwargs["title"] = title
+            download_kwargs["folder"] = folder
             return 0, "/downloads/Named playlist/file.mp4", "ok"
 
         with patch("app.scheduler.SessionLocal", self.Session), patch(
@@ -237,12 +240,65 @@ class DownloadNoticeTests(unittest.IsolatedAsyncioTestCase):
 
             await run_one_download()
 
+        self.assertEqual(download_kwargs["folder"], "Named playlist")
         self.assertEqual(download_kwargs["channel"], "Named playlist")
         self.assertEqual(download_kwargs["title"], "Already named lecture")
 
         with self.Session() as db:
             job = db.scalar(select(Video))
             self.assertEqual(job.channel, "Named playlist")
+
+    async def test_download_folder_stays_on_subscription_when_uploader_differs(self):
+        with self.Session() as db:
+            sub = Subscription(
+                source_url="https://vk.com/playlist/-1_2",
+                title="Algebra course",
+                enabled=True,
+            )
+            db.add(sub)
+            db.flush()
+            db.add(
+                Video(
+                    subscription_id=sub.id,
+                    source="vk",
+                    external_id="-1_2",
+                    webpage_url="https://vk.com/video-1_2",
+                    title="Lecture 4",
+                    channel="VK Uploader",
+                    upload_date="20240115",
+                    status="QUEUED",
+                    next_attempt_at=datetime.now(),
+                )
+            )
+            db.commit()
+
+        download_kwargs: dict = {}
+
+        async def fake_download(url, channel, title="", video_id="", upload_date=None, folder=None):
+            download_kwargs.update(
+                {"channel": channel, "title": title, "folder": folder}
+            )
+            return 0, "/downloads/Algebra course/2024-01-15 - Lecture 4 [-1_2].mp4", "ok"
+
+        with patch("app.scheduler.SessionLocal", self.Session), patch(
+            "app.scheduler.storage_ok", return_value=True
+        ), patch("app.scheduler.get_global_cooldown", return_value=None), patch(
+            "app.scheduler.download_video", side_effect=fake_download
+        ), patch(
+            "app.scheduler.notify", new_callable=AsyncMock
+        ), patch(
+            "app.scheduler.settings"
+        ) as fake_settings:
+            fake_settings.max_height = 720
+            fake_settings.min_gap_minutes = 15
+            fake_settings.max_gap_minutes = 30
+            from app.scheduler import run_one_download
+
+            await run_one_download()
+
+        self.assertEqual(download_kwargs["folder"], "Algebra course")
+        self.assertEqual(download_kwargs["channel"], "VK Uploader")
+        self.assertEqual(download_kwargs["title"], "Lecture 4")
 
 
 if __name__ == "__main__":

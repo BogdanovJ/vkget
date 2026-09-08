@@ -7,7 +7,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.ytdlp import (
     _netscape_cookie_line,
+    build_download_output,
+    download_folder_name,
+    download_stem,
     download_url_candidates,
+    format_upload_date,
     label_from_url,
     looks_like_bot_protection,
     mirror_url,
@@ -336,6 +340,99 @@ class FlareSolverrTests(unittest.IsolatedAsyncioTestCase):
             calls,
             ["https://vk.com/video-1_2", "https://vkvideo.ru/video-1_2"],
         )
+
+
+class DownloadPathTests(unittest.TestCase):
+    def test_subscription_folder_and_dated_filename(self):
+        self.assertEqual(download_folder_name(subscription_title="Algebra", channel="Uploader"), "Algebra")
+        path = build_download_output(
+            folder="Algebra",
+            title="Lecture 4 — Linear maps",
+            video_id="-214484275_456239461",
+            upload_date="20240115",
+        )
+        self.assertEqual(path.parent.name, "Algebra")
+        self.assertEqual(
+            path.name,
+            "2024-01-15 - Lecture 4 — Linear maps [-214484275_456239461].%(ext)s",
+        )
+
+    def test_placeholders_never_become_folders_or_na_dates(self):
+        self.assertEqual(
+            download_folder_name(subscription_title="Subscription", channel="Unknown"),
+            "_single",
+        )
+        self.assertEqual(format_upload_date("NA"), "")
+        self.assertEqual(format_upload_date("2024-01-15"), "2024-01-15")
+        path = build_download_output(
+            folder="Subscription",
+            title="Video -214484275_456239461",
+            video_id="-214484275_456239461",
+            upload_date="NA",
+        )
+        self.assertEqual(path.parent.name, "_single")
+        self.assertEqual(path.name, "Untitled [-214484275_456239461].%(ext)s")
+        self.assertNotIn("NA -", path.name)
+
+    def test_playlist_id_subscription_name_is_a_valid_folder(self):
+        self.assertEqual(
+            download_folder_name(subscription_title="-214484275_7", channel="Subscription"),
+            "-214484275_7",
+        )
+        path = build_download_output(
+            folder="-214484275_7",
+            title="Talk",
+            video_id="-1_2",
+            upload_date="20240115",
+        )
+        self.assertEqual(path.parent.name, "-214484275_7")
+
+    def test_one_off_uses_uploader_or_single(self):
+        self.assertEqual(download_folder_name(channel="Some Channel"), "Some Channel")
+        self.assertEqual(download_folder_name(channel="_single"), "_single")
+
+    def test_long_filename_stays_under_limit(self):
+        stem = download_stem("A" * 400, "-1_2", "20240115")
+        self.assertLessEqual(len(stem) + len(".mp4"), 255)
+        self.assertIn("[-1_2]", stem)
+        self.assertTrue(stem.startswith("2024-01-15 - "))
+
+
+class DownloadOutputWireTests(unittest.IsolatedAsyncioTestCase):
+    async def test_download_uses_subscription_folder_not_uploader(self):
+        outputs: list[str] = []
+
+        async def fake_once(url, output, fmt, extra_cookies=None, user_agent=None):
+            outputs.append(output)
+            return 0, output.replace("%(ext)s", "mp4"), "ok"
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "app.ytdlp.settings"
+        ) as fake_settings, patch(
+            "app.ytdlp._download_once", side_effect=fake_once
+        ):
+            fake_settings.flaresolverr_url = ""
+            fake_settings.download_root = tmp
+            fake_settings.max_height = 720
+            fake_settings.download_rate = "500K"
+            fake_settings.cookie_file = "/missing"
+            from app.ytdlp import download_video
+
+            rc, path, log = await download_video(
+                "https://vk.com/video-1_2",
+                "VK Uploader",
+                title="Lecture 4",
+                video_id="-1_2",
+                upload_date="20240115",
+                folder="Algebra course",
+            )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(outputs), 1)
+        self.assertIn("/Algebra course/", outputs[0])
+        self.assertIn("2024-01-15 - Lecture 4 [-1_2].%(ext)s", outputs[0])
+        self.assertNotIn("/VK Uploader/", outputs[0])
+        self.assertTrue(path.endswith("2024-01-15 - Lecture 4 [-1_2].mp4"))
 
 
 if __name__ == "__main__":

@@ -14,7 +14,9 @@ from .models import AppState, Subscription, Video
 from .notifier import format_video_notice, notify
 from .ytdlp import (
     PLACEHOLDER_TITLES,
+    download_folder_name,
     download_video,
+    format_upload_date,
     inspect_playlist_flat,
     is_usable_channel,
     is_usable_video_title,
@@ -353,7 +355,7 @@ def _needs_metadata_inspect(job: Video) -> bool:
     return (
         not is_usable_video_title(job.title, job.external_id)
         or not is_usable_channel(job.channel)
-        or not (job.upload_date or "").strip()
+        or not format_upload_date(job.upload_date)
     )
 
 
@@ -372,7 +374,7 @@ def _apply_resolved_metadata(
     elif folder_fallback.strip() and not is_usable_channel(job.channel):
         job.channel = folder_fallback.strip()[:500]
     date = (meta.get("upload_date") or "").strip()
-    if date:
+    if format_upload_date(date):
         job.upload_date = date
 
 
@@ -489,17 +491,19 @@ async def run_one_download():
         notice_title = job.display_title()
         db.commit()
 
-    download_title = (
-        title if is_usable_video_title(title, external_id) else "Untitled"
+    folder = download_folder_name(
+        subscription_title=sub_label,
+        channel=channel,
     )
 
     try:
         rc, final_path, log = await download_video(
             url,
             channel,
-            title=download_title,
+            title=title,
             video_id=external_id,
             upload_date=upload_date,
+            folder=folder,
         )
     except Exception as exc:
         retry_at = retry_time(attempts, "TRANSIENT")

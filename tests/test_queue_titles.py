@@ -124,6 +124,25 @@ class ResolveTitleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(meta["upload_date"], "20240115")
         inspect.assert_awaited_once()
 
+    async def test_metadata_uses_timestamp_when_upload_date_missing(self):
+        inspect = AsyncMock(
+            return_value={
+                "id": "-1_2",
+                "title": "Dated lecture",
+                "channel": "Algebra",
+                "timestamp": 1705276800,
+            }
+        )
+        with patch("app.ytdlp.inspect_url", inspect):
+            meta = await resolve_video_metadata(
+                "https://vk.com/video-1_2",
+                title="Dated lecture",
+                channel="Algebra",
+                upload_date="NA",
+                external_id="-1_2",
+            )
+        self.assertEqual(meta["upload_date"], "20240115")
+
     async def test_metadata_skips_inspect_when_complete(self):
         with patch("app.ytdlp.inspect_url", new_callable=AsyncMock) as inspect:
             meta = await resolve_video_metadata(
