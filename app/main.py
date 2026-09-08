@@ -18,6 +18,8 @@ from .scheduler import (
     recover_interrupted_downloads,
     scan_subscription,
     scheduler_loop,
+    get_global_cooldown,
+    now
 )
 from .ytdlp import inspect_url, normalize_vk_url
 
@@ -56,7 +58,10 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
         select(Subscription).order_by(Subscription.created_at.desc()).limit(8)
     ).all()
 
-    cooldown = db.get(AppState, "global_cooldown_until")
+    cooldown = get_global_cooldown(db)
+
+    if cooldown and cooldown <= now():
+        cooldown = None
 
     return templates.TemplateResponse(
         request=request,
@@ -65,7 +70,11 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
             "counts": counts,
             "recent": recent,
             "subs": subs,
-            "cooldown": cooldown.value if cooldown else None,
+            "cooldown": (
+                cooldown.strftime("%d %b, %H:%M")
+                if cooldown
+                else None
+            ),
             "max_height": settings.max_height,
         },
     )
