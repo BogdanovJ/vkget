@@ -11,7 +11,7 @@
 {% for v in videos %}
   <div class="row big">
     <span>
-      <strong>{{ v.title }}</strong>
+      <strong>{{ v.display_title() }}</strong>
       <small>
         {{ v.channel }} · ATTEMPT {{ v.attempts }} · NEXT {{ v.next_attempt_at or "NOW" }}
       </small>

@@ -39,7 +39,7 @@
       <a class="row" href="/subscriptions/{{ s.id }}">
         <span>
           <strong>{{ s.display_title() }}</strong>
-          <small>{{ s.source_url }}</small>
+          <small>{{ s.source_url|vkvideo }}</small>
           <small>NEXT SCAN: {{ s.next_scan_at|when if s.enabled else "NONE" }}</small>
           {% if s.last_scan_result %}
           <small{% if s.last_scan_result.startswith("FAILED") %} class="error"{% endif %}>{{ s.last_scan_result }}</small>
@@ -57,7 +57,7 @@
     {% for v in recent %}
       <div class="row">
         <span>
-          <strong>{{ v.title }}</strong>
+          <strong>{{ v.display_title() }}</strong>
           <small>{{ v.channel }}</small>
         </span>
         <em class="status">{{ v.status }}</em>

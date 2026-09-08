@@ -8,6 +8,7 @@ import re
 import shutil
 import tempfile
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 from urllib.parse import unquote, urlparse, urlunparse
@@ -17,6 +18,24 @@ import httpx
 from .config import settings
 
 PLACEHOLDER_TITLES = {"", "Scanning…", "Scanning...", "Subscription"}
+_UNUSABLE_VIDEO_TITLES = frozenset(
+    {
+        "",
+        "na",
+        "n/a",
+        "untitled",
+        "unknown",
+        "scanning…",
+        "scanning...",
+        "subscription",
+        "video",
+    }
+)
+_VK_ID_RE = re.compile(r"^-?\d+_\d+$")
+_VK_SLUG_RE = re.compile(
+    r"^(?:video|clip|playlist)[-/]-?\d+(?:_\d+)?$",
+    re.I,
+)
 
 _VK_COM_HOSTS = {
     "vk.com",
@@ -137,6 +156,122 @@ def download_url_candidates(url: str) -> list[str]:
     if secondary == primary:
         return [primary]
     return [primary, secondary]
+
+
+def is_usable_video_title(title: str | None, external_id: str = "") -> bool:
+    """False for empty/NA/url-bit titles that VK --flat-playlist often yields."""
+    text = (title or "").strip()
+    if not text:
+        return False
+    if text.casefold() in _UNUSABLE_VIDEO_TITLES:
+        return False
+    ext = str(external_id or "").strip()
+    if ext and text == ext:
+        return False
+    if ext and text.casefold() == f"video {ext}".casefold():
+        return False
+    if _VK_ID_RE.fullmatch(text) or _VK_SLUG_RE.fullmatch(text):
+        return False
+    lowered = text.casefold()
+    if lowered.startswith(("http://", "https://", "//")):
+        return False
+    if "vk.com/" in lowered or "vkvideo.ru/" in lowered:
+        return False
+    return True
+
+
+def is_usable_channel(name: str | None) -> bool:
+    text = (name or "").strip()
+    if not text:
+        return False
+    if text.casefold() in _UNUSABLE_VIDEO_TITLES:
+        return False
+    if _VK_ID_RE.fullmatch(text) or _VK_SLUG_RE.fullmatch(text):
+        return False
+    return True
+
+
+def is_usable_folder(name: str | None) -> bool:
+    """Folders may be playlist IDs; they may not be scan leftovers like Subscription."""
+    text = (name or "").strip()
+    if not text or text in {".", ".."}:
+        return False
+    return text.casefold() not in _UNUSABLE_VIDEO_TITLES
+
+
+def download_folder_name(*, subscription_title: str = "", channel: str = "") -> str:
+    """Keep one subscription's files together; never use Subscription/Unknown/NA."""
+    for candidate in (subscription_title, channel):
+        text = (candidate or "").strip()
+        if is_usable_folder(text):
+            return text
+    return "_single"
+
+
+def filename_title(title: str | None, external_id: str = "") -> str:
+    text = (title or "").strip()
+    if is_usable_video_title(text, external_id):
+        return text
+    return "Untitled"
+
+
+def format_upload_date(raw: str | None) -> str:
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    digits = text.replace("-", "")
+    if len(digits) >= 8 and digits[:8].isdigit():
+        return f"{digits[0:4]}-{digits[4:6]}-{digits[6:8]}"
+    return ""
+
+
+def download_stem(
+    title: str,
+    video_id: str,
+    upload_date: str | None = None,
+) -> str:
+    date_part = format_upload_date(upload_date)
+    name = safe_component(filename_title(title, video_id), default="Untitled")
+    vid = safe_component(video_id or "id", default="id")[:80]
+    if date_part:
+        stem = f"{date_part} - {name} [{vid}]"
+    else:
+        stem = f"{name} [{vid}]"
+    max_stem = 251
+    extra = len(stem) - len(name)
+    if extra < 0:
+        extra = 0
+    if len(stem) > max_stem:
+        name = name[: max(16, max_stem - extra)].rstrip(" .") or "Untitled"
+        if date_part:
+            stem = f"{date_part} - {name} [{vid}]"
+        else:
+            stem = f"{name} [{vid}]"
+    return stem[:max_stem]
+
+
+def build_download_output(
+    *,
+    folder: str,
+    title: str,
+    video_id: str,
+    upload_date: str | None = None,
+) -> Path:
+    dir_name = safe_component(folder, default="_single")
+    if not is_usable_folder(dir_name):
+        dir_name = "_single"
+    stem = download_stem(title, video_id, upload_date)
+    return Path(settings.download_root) / dir_name / f"{stem}.%(ext)s"
+
+
+def title_from_entry(entry: dict | None, external_id: str = "") -> str:
+    if not isinstance(entry, dict):
+        return ""
+    for key in ("title", "fulltitle", "alt_title"):
+        value = entry.get(key)
+        if isinstance(value, str) and is_usable_video_title(value, external_id):
+            return value.strip()
+    return ""
 
 
 def label_from_url(url: str) -> str:
@@ -345,6 +480,75 @@ async def inspect_url(url: str) -> dict:
     return await _try_hosts_json(download_url_candidates(url), extra, 120)
 
 
+async def resolve_video_metadata(
+    url: str,
+    *,
+    title: str = "",
+    channel: str = "",
+    upload_date: str | None = None,
+    external_id: str = "",
+) -> dict[str, str]:
+    """Fill title/channel/date from a full inspect when scan leftovers are URL bits."""
+    result = {
+        "title": (title or "").strip(),
+        "channel": (channel or "").strip(),
+        "upload_date": (upload_date or "").strip(),
+    }
+    if not format_upload_date(result["upload_date"]):
+        result["upload_date"] = ""
+    needs_inspect = (
+        not is_usable_video_title(result["title"], external_id)
+        or not is_usable_channel(result["channel"])
+        or not result["upload_date"]
+    )
+    if not needs_inspect:
+        return result
+    try:
+        info = await inspect_url(url)
+    except Exception:
+        return result
+    ext = str(info.get("id") or external_id)
+    resolved = title_from_entry(info, ext)
+    if resolved:
+        result["title"] = resolved
+    ch = (
+        info.get("channel")
+        or info.get("uploader")
+        or info.get("playlist_uploader")
+        or ""
+    )
+    if isinstance(ch, str) and is_usable_channel(ch):
+        result["channel"] = ch.strip()
+    raw_date = info.get("upload_date") or info.get("release_date")
+    if raw_date:
+        result["upload_date"] = str(raw_date).strip()
+    elif not result["upload_date"]:
+        ts = info.get("timestamp") or info.get("release_timestamp")
+        try:
+            stamp = datetime.fromtimestamp(int(ts), tz=timezone.utc)
+            result["upload_date"] = stamp.strftime("%Y%m%d")
+        except (TypeError, ValueError, OSError, OverflowError):
+            pass
+    return result
+
+
+async def resolve_video_title(
+    url: str,
+    current: str,
+    external_id: str = "",
+) -> str:
+    """Inspect a single video URL only when the stored/playlist title is unusable."""
+    current = (current or "").strip()
+    if is_usable_video_title(current, external_id):
+        return current
+    meta = await resolve_video_metadata(
+        url,
+        title=current,
+        external_id=external_id,
+    )
+    return meta["title"] or current
+
+
 async def inspect_playlist_flat(url: str) -> dict:
     extra = [
         "--flat-playlist",
@@ -355,11 +559,12 @@ async def inspect_playlist_flat(url: str) -> dict:
     return await _try_hosts_json(scan_url_candidates(url), extra, 180)
 
 
-def safe_component(value: str) -> str:
-    value = (value or "Unknown").strip()
+def safe_component(value: str, *, default: str = "Unknown") -> str:
+    value = (value or default).strip()
     value = re.sub(r'[\/\\:*?"<>|%$]', "_", value)
+    value = re.sub(r"[\x00-\x1f]", "", value)
     value = re.sub(r"\s+", " ", value)
-    return value[:180].strip(" .") or "Unknown"
+    return value[:180].strip(" .") or default
 
 
 async def _download_once(
@@ -406,28 +611,24 @@ async def download_video(
     title: str = "",
     video_id: str = "",
     upload_date: str | None = None,
+    folder: str | None = None,
 ):
-    folder = Path(settings.download_root) / safe_component(channel)
-    folder.mkdir(parents=True, exist_ok=True)
+    output_path = build_download_output(
+        folder=download_folder_name(
+            subscription_title=folder or "",
+            channel=channel,
+        ),
+        title=title,
+        video_id=video_id,
+        upload_date=upload_date,
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output = str(output_path)
 
     fmt = (
         f"bestvideo[height<={settings.max_height}]+bestaudio/"
         f"best[height<={settings.max_height}]/best"
     )
-
-    raw_date = (upload_date or "").strip()
-    if len(raw_date) >= 8 and raw_date[:8].isdigit():
-        date_part = f"{raw_date[0:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
-    elif raw_date:
-        date_part = safe_component(raw_date)[:16]
-    else:
-        date_part = "NA"
-
-    stem = (
-        f"{date_part} - {safe_component(title or 'video')} "
-        f"[{safe_component(video_id or 'id')}]"
-    )
-    output = str(folder / f"{stem}.%(ext)s")
 
     last_rc = 1
     last_path = None

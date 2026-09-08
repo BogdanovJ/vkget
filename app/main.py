@@ -21,7 +21,16 @@ from .scheduler import (
     get_global_cooldown,
     now
 )
-from .ytdlp import inspect_url, label_from_url, normalize_vk_url
+from .ytdlp import (
+    inspect_url,
+    is_usable_channel,
+    is_usable_video_title,
+    label_from_url,
+    normalize_vk_url,
+    resolve_video_metadata,
+    title_from_entry,
+    to_vkvideo,
+)
 
 app = FastAPI(title="VKGET")
 templates = Jinja2Templates(directory="app/templates")
@@ -44,6 +53,7 @@ def format_when(value: datetime | None, current: datetime | None = None) -> str:
 
 templates.env.filters["stamp"] = format_stamp
 templates.env.filters["when"] = format_when
+templates.env.filters["vkvideo"] = to_vkvideo
 
 @app.on_event("startup")
 async def startup():
@@ -108,7 +118,7 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
             ready_at = cooldown
         next_download = {
             "when": format_when(ready_at, current),
-            "title": next_download_video.title,
+            "title": next_download_video.display_title(),
         }
 
     return templates.TemplateResponse(
@@ -215,11 +225,16 @@ async def add_one_off(
     if existing:
         return RedirectResponse("/queue", status_code=303)
 
+    video_title = title_from_entry(data, external_id)
+    if not video_title:
+        raw = data.get("title") or data.get("fulltitle") or data.get("alt_title") or ""
+        video_title = str(raw).strip() or f"Video {external_id}"
+
     video = Video(
         source="vk",
         external_id=external_id,
         webpage_url=data.get("webpage_url") or normalized,
-        title=(data.get("title") or external_id)[:1000],
+        title=video_title[:1000],
         channel=(
             data.get("channel")
             or data.get("uploader")
@@ -305,7 +320,7 @@ async def scan_now(sub_id: int):
     )
 
 @app.post("/videos/{video_id}/download")
-def force_download(
+async def force_download(
     video_id: int,
     db: Session = Depends(get_db),
 ):
@@ -316,11 +331,34 @@ def force_download(
     video.status = "QUEUED"
     video.ignore_reason = None
     video.next_attempt_at = datetime.now()
+    webpage_url = video.webpage_url
+    current_title = video.title
+    current_channel = video.channel
+    current_date = video.upload_date
+    external_id = video.external_id
+    subscription_id = video.subscription_id
     db.commit()
 
+    meta = await resolve_video_metadata(
+        webpage_url,
+        title=current_title,
+        channel=current_channel,
+        upload_date=current_date,
+        external_id=external_id,
+    )
+    video = db.get(Video, video_id)
+    if video:
+        if is_usable_video_title(meta["title"], external_id):
+            video.title = meta["title"][:1000]
+        if is_usable_channel(meta["channel"]):
+            video.channel = meta["channel"][:500]
+        if meta.get("upload_date"):
+            video.upload_date = meta["upload_date"]
+        db.commit()
+
     target = (
-        f"/subscriptions/{video.subscription_id}"
-        if video.subscription_id
+        f"/subscriptions/{subscription_id}"
+        if subscription_id
         else "/queue"
     )
     return RedirectResponse(target, status_code=303)
