@@ -179,6 +179,17 @@ def is_usable_video_title(title: str | None, external_id: str = "") -> bool:
     return True
 
 
+def is_usable_channel(name: str | None) -> bool:
+    text = (name or "").strip()
+    if not text:
+        return False
+    if text.casefold() in _UNUSABLE_VIDEO_TITLES:
+        return False
+    if _VK_ID_RE.fullmatch(text) or _VK_SLUG_RE.fullmatch(text):
+        return False
+    return True
+
+
 def title_from_entry(entry: dict | None, external_id: str = "") -> str:
     if not isinstance(entry, dict):
         return ""
@@ -395,6 +406,49 @@ async def inspect_url(url: str) -> dict:
     return await _try_hosts_json(download_url_candidates(url), extra, 120)
 
 
+async def resolve_video_metadata(
+    url: str,
+    *,
+    title: str = "",
+    channel: str = "",
+    upload_date: str | None = None,
+    external_id: str = "",
+) -> dict[str, str]:
+    """Fill title/channel/date from a full inspect when scan leftovers are URL bits."""
+    result = {
+        "title": (title or "").strip(),
+        "channel": (channel or "").strip(),
+        "upload_date": (upload_date or "").strip(),
+    }
+    needs_inspect = (
+        not is_usable_video_title(result["title"], external_id)
+        or not is_usable_channel(result["channel"])
+        or not result["upload_date"]
+    )
+    if not needs_inspect:
+        return result
+    try:
+        info = await inspect_url(url)
+    except Exception:
+        return result
+    ext = str(info.get("id") or external_id)
+    resolved = title_from_entry(info, ext)
+    if resolved:
+        result["title"] = resolved
+    ch = (
+        info.get("channel")
+        or info.get("uploader")
+        or info.get("playlist_uploader")
+        or ""
+    )
+    if isinstance(ch, str) and is_usable_channel(ch):
+        result["channel"] = ch.strip()
+    raw_date = info.get("upload_date")
+    if raw_date:
+        result["upload_date"] = str(raw_date).strip()
+    return result
+
+
 async def resolve_video_title(
     url: str,
     current: str,
@@ -404,12 +458,12 @@ async def resolve_video_title(
     current = (current or "").strip()
     if is_usable_video_title(current, external_id):
         return current
-    try:
-        info = await inspect_url(url)
-    except Exception:
-        return current
-    resolved = title_from_entry(info, str(info.get("id") or external_id))
-    return resolved or current
+    meta = await resolve_video_metadata(
+        url,
+        title=current,
+        external_id=external_id,
+    )
+    return meta["title"] or current
 
 
 async def inspect_playlist_flat(url: str) -> dict:

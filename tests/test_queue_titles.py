@@ -12,7 +12,9 @@ from sqlalchemy.orm import sessionmaker
 from app.db import Base
 from app.models import Subscription, Video
 from app.ytdlp import (
+    is_usable_channel,
     is_usable_video_title,
+    resolve_video_metadata,
     resolve_video_title,
     title_from_entry,
 )
@@ -41,6 +43,13 @@ class UsableTitleTests(unittest.TestCase):
         self.assertTrue(
             is_usable_video_title("Lecture 4 — Linear maps", "-123_456")
         )
+
+    def test_rejects_placeholder_channels(self):
+        self.assertFalse(is_usable_channel("Subscription"))
+        self.assertFalse(is_usable_channel("Unknown"))
+        self.assertFalse(is_usable_channel("NA"))
+        self.assertFalse(is_usable_channel(""))
+        self.assertTrue(is_usable_channel("Algebra channel"))
 
     def test_title_from_entry_prefers_usable_fields(self):
         ext = "-123_456"
@@ -92,6 +101,41 @@ class ResolveTitleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(title, "Inspected lecture")
         inspect.assert_awaited_once()
 
+    async def test_metadata_fills_title_channel_and_date(self):
+        inspect = AsyncMock(
+            return_value={
+                "id": "-1_2",
+                "title": "NA",
+                "fulltitle": "Inspected lecture",
+                "channel": "Algebra",
+                "upload_date": "20240115",
+            }
+        )
+        with patch("app.ytdlp.inspect_url", inspect):
+            meta = await resolve_video_metadata(
+                "https://vk.com/video-1_2",
+                title="Video -1_2",
+                channel="Subscription",
+                upload_date=None,
+                external_id="-1_2",
+            )
+        self.assertEqual(meta["title"], "Inspected lecture")
+        self.assertEqual(meta["channel"], "Algebra")
+        self.assertEqual(meta["upload_date"], "20240115")
+        inspect.assert_awaited_once()
+
+    async def test_metadata_skips_inspect_when_complete(self):
+        with patch("app.ytdlp.inspect_url", new_callable=AsyncMock) as inspect:
+            meta = await resolve_video_metadata(
+                "https://vk.com/video-1_2",
+                title="Already a real title",
+                channel="Algebra",
+                upload_date="20240115",
+                external_id="-1_2",
+            )
+        self.assertEqual(meta["title"], "Already a real title")
+        inspect.assert_not_called()
+
 
 class ScanQueueTitleTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -138,15 +182,19 @@ class ScanQueueTitleTests(unittest.IsolatedAsyncioTestCase):
         }
         inspected: list[str] = []
 
-        async def fake_resolve(url, current, external_id=""):
+        async def fake_resolve(url, *, title="", channel="", upload_date=None, external_id=""):
             inspected.append(url)
-            return "Real queued lecture"
+            return {
+                "title": "Real queued lecture",
+                "channel": "Algebra channel",
+                "upload_date": "20240115",
+            }
 
         with patch("app.scheduler.SessionLocal", self.Session), patch(
             "app.scheduler.inspect_playlist_flat",
             AsyncMock(return_value=playlist),
         ), patch(
-            "app.scheduler.resolve_video_title",
+            "app.scheduler.resolve_video_metadata",
             side_effect=fake_resolve,
         ):
             from app.scheduler import scan_subscription
@@ -163,6 +211,8 @@ class ScanQueueTitleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(videos["-1_1"].title, "NA")
             self.assertEqual(videos["-1_2"].status, "QUEUED")
             self.assertEqual(videos["-1_2"].title, "Real queued lecture")
+            self.assertEqual(videos["-1_2"].channel, "Algebra channel")
+            self.assertEqual(videos["-1_2"].upload_date, "20240115")
             self.assertEqual(videos["-1_2"].display_title(), "Real queued lecture")
 
     async def test_scan_does_not_inspect_queued_human_title(self):
@@ -196,7 +246,7 @@ class ScanQueueTitleTests(unittest.IsolatedAsyncioTestCase):
         with patch("app.scheduler.SessionLocal", self.Session), patch(
             "app.scheduler.inspect_playlist_flat",
             AsyncMock(return_value=playlist),
-        ), patch("app.scheduler.resolve_video_title", inspect):
+        ), patch("app.scheduler.resolve_video_metadata", inspect):
             from app.scheduler import scan_subscription
 
             await scan_subscription(sub_id, initial=True)

@@ -11,14 +11,15 @@ from .config import settings
 from .db import SessionLocal
 from .filters import rejection_reason
 from .models import AppState, Subscription, Video
-from .notifier import notify
+from .notifier import format_video_notice, notify
 from .ytdlp import (
     PLACEHOLDER_TITLES,
     download_video,
     inspect_playlist_flat,
+    is_usable_channel,
     is_usable_video_title,
     label_from_url,
-    resolve_video_title,
+    resolve_video_metadata,
     title_from_entry,
 )
 
@@ -322,13 +323,19 @@ async def scan_subscription(subscription_id: int, initial: bool = False):
 
     for index in inspect_indexes:
         row = new_videos[index]
-        row["title"] = (
-            await resolve_video_title(
-                row["webpage_url"],
-                row["title"],
-                row["external_id"],
-            )
-        )[:1000]
+        meta = await resolve_video_metadata(
+            row["webpage_url"],
+            title=row["title"],
+            channel=row["channel"],
+            upload_date=row.get("upload_date"),
+            external_id=row["external_id"],
+        )
+        if is_usable_video_title(meta["title"], row["external_id"]):
+            row["title"] = meta["title"][:1000]
+        if is_usable_channel(meta["channel"]):
+            row["channel"] = meta["channel"][:500]
+        if meta.get("upload_date"):
+            row["upload_date"] = meta["upload_date"]
 
     with SessionLocal() as db:
         sub = db.get(Subscription, subscription_id)
@@ -342,8 +349,35 @@ async def scan_subscription(subscription_id: int, initial: bool = False):
         sub.next_scan_at = next_at
         db.commit()
 
+def _needs_metadata_inspect(job: Video) -> bool:
+    return (
+        not is_usable_video_title(job.title, job.external_id)
+        or not is_usable_channel(job.channel)
+        or not (job.upload_date or "").strip()
+    )
+
+
+def _apply_resolved_metadata(
+    job: Video,
+    meta: dict,
+    *,
+    folder_fallback: str = "",
+) -> None:
+    title = (meta.get("title") or "").strip()
+    if is_usable_video_title(title, job.external_id):
+        job.title = title[:1000]
+    channel = (meta.get("channel") or "").strip()
+    if is_usable_channel(channel):
+        job.channel = channel[:500]
+    elif folder_fallback.strip() and not is_usable_channel(job.channel):
+        job.channel = folder_fallback.strip()[:500]
+    date = (meta.get("upload_date") or "").strip()
+    if date:
+        job.upload_date = date
+
+
 async def resolve_placeholder_queued_titles(limit: int = 1):
-    """Fill real titles for already-queued rows that still store URL bits."""
+    """Fill real titles/channel/date for queued rows that still store URL bits."""
     with SessionLocal() as db:
         jobs = db.scalars(
             select(Video)
@@ -353,24 +387,33 @@ async def resolve_placeholder_queued_titles(limit: int = 1):
         ).all()
         targets = []
         for job in jobs:
-            if is_usable_video_title(job.title, job.external_id):
+            if not _needs_metadata_inspect(job):
                 continue
-            targets.append((job.id, job.webpage_url, job.title, job.external_id))
+            targets.append(
+                (
+                    job.id,
+                    job.webpage_url,
+                    job.title,
+                    job.channel,
+                    job.upload_date,
+                    job.external_id,
+                )
+            )
             if len(targets) >= limit:
                 break
 
-    for video_id, url, title, external_id in targets:
-        resolved = await resolve_video_title(url, title, external_id)
-        if not resolved or resolved == title:
-            continue
+    for video_id, url, title, channel, upload_date, external_id in targets:
+        meta = await resolve_video_metadata(
+            url,
+            title=title,
+            channel=channel,
+            upload_date=upload_date,
+            external_id=external_id,
+        )
         with SessionLocal() as db:
             job = db.get(Video, video_id)
-            if (
-                job
-                and job.status in {"QUEUED", "FAILED_TEMPORARY"}
-                and not is_usable_video_title(job.title, job.external_id)
-            ):
-                job.title = resolved[:1000]
+            if job and job.status in {"QUEUED", "FAILED_TEMPORARY"}:
+                _apply_resolved_metadata(job, meta)
                 db.commit()
 
 async def run_one_download():
@@ -403,25 +446,58 @@ async def run_one_download():
             )
             return
 
-        job.status = "DOWNLOADING"
-        job.attempts += 1
-        job.next_attempt_at = None
-
         video_id = job.id
         url = job.webpage_url
         channel = job.channel
         title = job.title
         external_id = job.external_id
         upload_date = job.upload_date
-        attempts = job.attempts
+        sub = job.subscription
+        sub_label = sub.display_title() if sub else ""
+        needs_inspect = _needs_metadata_inspect(job)
 
+    meta = {
+        "title": (title or "").strip(),
+        "channel": (channel or "").strip(),
+        "upload_date": (upload_date or "").strip(),
+    }
+    if needs_inspect:
+        meta = await resolve_video_metadata(
+            url,
+            title=title,
+            channel=channel,
+            upload_date=upload_date,
+            external_id=external_id,
+        )
+
+    with SessionLocal() as db:
+        job = db.get(Video, video_id)
+        if not job or job.status not in {"QUEUED", "FAILED_TEMPORARY"}:
+            return
+
+        _apply_resolved_metadata(job, meta, folder_fallback=sub_label)
+        job.status = "DOWNLOADING"
+        job.attempts += 1
+        job.next_attempt_at = None
+
+        url = job.webpage_url
+        channel = job.channel
+        title = job.title
+        external_id = job.external_id
+        upload_date = job.upload_date
+        attempts = job.attempts
+        notice_title = job.display_title()
         db.commit()
+
+    download_title = (
+        title if is_usable_video_title(title, external_id) else "Untitled"
+    )
 
     try:
         rc, final_path, log = await download_video(
             url,
             channel,
-            title=title,
+            title=download_title,
             video_id=external_id,
             upload_date=upload_date,
         )
@@ -437,10 +513,15 @@ async def run_one_download():
                 db.commit()
 
         await notify(
-            "⚠ VKGET\n"
-            f"{title}\n"
-            f"Download process failed: {type(exc).__name__}\n"
-            f"Next attempt: {retry_at:%Y-%m-%d %H:%M}"
+            format_video_notice(
+                ok=False,
+                title=notice_title,
+                channel=channel,
+                page_url=url,
+                detail=f"Download process failed: {type(exc).__name__}",
+                retry_at=retry_at,
+                external_id=external_id,
+            )
         )
         return
 
@@ -448,6 +529,11 @@ async def run_one_download():
         job = db.get(Video, video_id)
         if not job:
             return
+
+        notice_title = job.display_title()
+        channel = job.channel
+        url = job.webpage_url
+        external_id = job.external_id
 
         if rc == 0:
             job.status = "COMPLETED"
@@ -465,10 +551,15 @@ async def run_one_download():
             db.commit()
 
             await notify(
-                "✅ VKGET\n"
-                f"{title}\n"
-                f"Downloaded ≤{settings.max_height}p\n"
-                f"{final_path or ''}"
+                format_video_notice(
+                    ok=True,
+                    title=notice_title,
+                    channel=channel,
+                    height=settings.max_height,
+                    path=final_path or "",
+                    page_url=url,
+                    external_id=external_id,
+                )
             )
             return
 
@@ -486,17 +577,27 @@ async def run_one_download():
 
         if kind == "RATE_LIMIT":
             await notify(
-                "⚠ VKGET\n"
-                "VK appears rate-limited.\n"
-                f"{title}\n"
-                f"Next attempt: {retry_at:%Y-%m-%d %H:%M}"
+                format_video_notice(
+                    ok=False,
+                    title=notice_title,
+                    channel=channel,
+                    page_url=url,
+                    detail="VK appears rate-limited.",
+                    retry_at=retry_at,
+                    external_id=external_id,
+                )
             )
         elif kind in {"BLOCK_OR_AUTH", "AUTH"}:
             await notify(
-                "⚠ VKGET\n"
-                "Authentication or access problem.\n"
-                f"{title}\n"
-                f"Next attempt: {retry_at:%Y-%m-%d %H:%M}"
+                format_video_notice(
+                    ok=False,
+                    title=notice_title,
+                    channel=channel,
+                    page_url=url,
+                    detail="Authentication or access problem.",
+                    retry_at=retry_at,
+                    external_id=external_id,
+                )
             )
 
 async def scheduler_loop():

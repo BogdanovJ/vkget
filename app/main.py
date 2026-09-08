@@ -23,9 +23,11 @@ from .scheduler import (
 )
 from .ytdlp import (
     inspect_url,
+    is_usable_channel,
+    is_usable_video_title,
     label_from_url,
     normalize_vk_url,
-    resolve_video_title,
+    resolve_video_metadata,
     title_from_entry,
     to_vkvideo,
 )
@@ -331,16 +333,28 @@ async def force_download(
     video.next_attempt_at = datetime.now()
     webpage_url = video.webpage_url
     current_title = video.title
+    current_channel = video.channel
+    current_date = video.upload_date
     external_id = video.external_id
     subscription_id = video.subscription_id
     db.commit()
 
-    resolved = await resolve_video_title(webpage_url, current_title, external_id)
-    if resolved and resolved != current_title:
-        video = db.get(Video, video_id)
-        if video:
-            video.title = resolved[:1000]
-            db.commit()
+    meta = await resolve_video_metadata(
+        webpage_url,
+        title=current_title,
+        channel=current_channel,
+        upload_date=current_date,
+        external_id=external_id,
+    )
+    video = db.get(Video, video_id)
+    if video:
+        if is_usable_video_title(meta["title"], external_id):
+            video.title = meta["title"][:1000]
+        if is_usable_channel(meta["channel"]):
+            video.channel = meta["channel"][:500]
+        if meta.get("upload_date"):
+            video.upload_date = meta["upload_date"]
+        db.commit()
 
     target = (
         f"/subscriptions/{subscription_id}"
