@@ -187,6 +187,11 @@ h2{
   font-size:11px;
 }
 
+.notice.bad{
+  border-color:var(--fg);
+  color:var(--fg);
+}
+
 .muted{opacity:.6}
 .error{max-width:620px;color:var(--accent)}
 form{display:grid;gap:10px}

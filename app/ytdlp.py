@@ -97,11 +97,17 @@ async def inspect_playlist_flat(url: str) -> dict:
 
 def safe_component(value: str) -> str:
     value = (value or "Unknown").strip()
-    value = re.sub(r'[\/\\:*?"<>|]', "_", value)
+    value = re.sub(r'[\/\\:*?"<>|%$]', "_", value)
     value = re.sub(r"\s+", " ", value)
     return value[:180].strip(" .") or "Unknown"
 
-async def download_video(url: str, channel: str):
+async def download_video(
+    url: str,
+    channel: str,
+    title: str = "",
+    video_id: str = "",
+    upload_date: str | None = None,
+):
     url = normalize_vk_url(url)
     folder = Path(settings.download_root) / safe_component(channel)
     folder.mkdir(parents=True, exist_ok=True)
@@ -111,9 +117,19 @@ async def download_video(url: str, channel: str):
         f"best[height<={settings.max_height}]/best"
     )
 
-    output = str(
-        folder / "%(upload_date>%Y-%m-%d,Unknown)s - %(title)s [%(id)s].%(ext)s"
+    raw_date = (upload_date or "").strip()
+    if len(raw_date) >= 8 and raw_date[:8].isdigit():
+        date_part = f"{raw_date[0:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
+    elif raw_date:
+        date_part = safe_component(raw_date)[:16]
+    else:
+        date_part = "NA"
+
+    stem = (
+        f"{date_part} - {safe_component(title or 'video')} "
+        f"[{safe_component(video_id or 'id')}]"
     )
+    output = str(folder / f"{stem}.%(ext)s")
 
     args = common_args() + [
         "--format", fmt,

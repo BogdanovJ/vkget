@@ -12,6 +12,16 @@
   </form>
 </section>
 
+{% if sub.last_scan_result %}
+<div class="notice{% if sub.last_scan_result.startswith('FAILED') %} bad{% endif %}">
+  LAST SCAN{% if sub.last_scan_at %}: {{ sub.last_scan_at|stamp }}{% endif %}
+  · {{ sub.last_scan_result }}
+</div>
+{% if sub.last_error and sub.last_scan_result.startswith("FAILED") %}
+<p class="error">{{ sub.last_error[-300:] }}</p>
+{% endif %}
+{% endif %}
+
 <section class="panel meta">
   <span>INITIAL: LAST {{ sub.initial_last_n }}</span>
   <span>NEXT: {{ sub.next_scan_at|when if sub.enabled else "NONE" }}</span>
