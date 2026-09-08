@@ -12,3 +12,6 @@ data:
   MIN_GAP_MAX_MINUTES: "30"
   DISCOVERY_INTERVAL_MIN_HOURS: "3"
   DISCOVERY_INTERVAL_MAX_HOURS: "6"
+  # Optional FlareSolverr base URL. Empty keeps bot-challenge retries disabled.
+  FLARESOLVERR_URL: ""
+  FLARESOLVERR_URL: "http://flaresolverr.flaresolverr.svc.cluster.local:8191"
