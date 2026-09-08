@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .config import settings
-from .db import Base, engine, get_db
+from .db import ensure_schema, get_db
 from .models import AppState, Subscription, Video
 from .scheduler import (
     recover_interrupted_downloads,
@@ -21,7 +21,7 @@ from .scheduler import (
     get_global_cooldown,
     now
 )
-from .ytdlp import inspect_url, normalize_vk_url
+from .ytdlp import inspect_url, label_from_url, normalize_vk_url
 
 app = FastAPI(title="VKGET")
 templates = Jinja2Templates(directory="app/templates")
@@ -47,7 +47,7 @@ templates.env.filters["when"] = format_when
 
 @app.on_event("startup")
 async def startup():
-    Base.metadata.create_all(engine)
+    ensure_schema()
     recover_interrupted_downloads()
     asyncio.create_task(scheduler_loop())
 
@@ -124,7 +124,9 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
                     if next_scan_sub
                     else "NONE"
                 ),
-                "title": next_scan_sub.title if next_scan_sub else None,
+                "title": (
+                    next_scan_sub.display_title() if next_scan_sub else None
+                ),
                 "id": next_scan_sub.id if next_scan_sub else None,
             },
             "next_download": next_download,
@@ -157,15 +159,19 @@ def add_page(request: Request):
 @app.post("/subscriptions")
 async def add_subscription(
     url: str = Form(...),
+    name: str = Form(""),
     initial_last_n: int = Form(3),
     min_duration_minutes: int = Form(10),
     stop_words: str = Form(""),
     watch_future: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
+    source_url = normalize_vk_url(url)
+    custom_name = (name or "").strip()
     sub = Subscription(
-        source_url=normalize_vk_url(url),
-        title="Scanning…",
+        source_url=source_url,
+        title=(custom_name or label_from_url(source_url))[:500],
+        title_is_custom=bool(custom_name),
         initial_last_n=max(initial_last_n, 0),
         watch_future=watch_future == "on",
         min_duration_seconds=max(min_duration_minutes, 0) * 60,

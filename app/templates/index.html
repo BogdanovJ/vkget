@@ -38,7 +38,8 @@
     {% for s in subs %}
       <a class="row" href="/subscriptions/{{ s.id }}">
         <span>
-          {{ s.title }}
+          <strong>{{ s.display_title() }}</strong>
+          <small>{{ s.source_url }}</small>
           <small>NEXT SCAN: {{ s.next_scan_at|when if s.enabled else "NONE" }}</small>
         </span>
         <small>{{ "ON" if s.enabled else "OFF" }}</small>
