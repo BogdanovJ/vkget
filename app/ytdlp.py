@@ -17,6 +17,24 @@ import httpx
 from .config import settings
 
 PLACEHOLDER_TITLES = {"", "Scanning…", "Scanning...", "Subscription"}
+_UNUSABLE_VIDEO_TITLES = frozenset(
+    {
+        "",
+        "na",
+        "n/a",
+        "untitled",
+        "unknown",
+        "scanning…",
+        "scanning...",
+        "subscription",
+        "video",
+    }
+)
+_VK_ID_RE = re.compile(r"^-?\d+_\d+$")
+_VK_SLUG_RE = re.compile(
+    r"^(?:video|clip|playlist)[-/]-?\d+(?:_\d+)?$",
+    re.I,
+)
 
 _VK_COM_HOSTS = {
     "vk.com",
@@ -137,6 +155,38 @@ def download_url_candidates(url: str) -> list[str]:
     if secondary == primary:
         return [primary]
     return [primary, secondary]
+
+
+def is_usable_video_title(title: str | None, external_id: str = "") -> bool:
+    """False for empty/NA/url-bit titles that VK --flat-playlist often yields."""
+    text = (title or "").strip()
+    if not text:
+        return False
+    if text.casefold() in _UNUSABLE_VIDEO_TITLES:
+        return False
+    ext = str(external_id or "").strip()
+    if ext and text == ext:
+        return False
+    if ext and text.casefold() == f"video {ext}".casefold():
+        return False
+    if _VK_ID_RE.fullmatch(text) or _VK_SLUG_RE.fullmatch(text):
+        return False
+    lowered = text.casefold()
+    if lowered.startswith(("http://", "https://", "//")):
+        return False
+    if "vk.com/" in lowered or "vkvideo.ru/" in lowered:
+        return False
+    return True
+
+
+def title_from_entry(entry: dict | None, external_id: str = "") -> str:
+    if not isinstance(entry, dict):
+        return ""
+    for key in ("title", "fulltitle", "alt_title"):
+        value = entry.get(key)
+        if isinstance(value, str) and is_usable_video_title(value, external_id):
+            return value.strip()
+    return ""
 
 
 def label_from_url(url: str) -> str:
@@ -343,6 +393,23 @@ async def inspect_url(url: str) -> dict:
         "--no-warnings",
     ]
     return await _try_hosts_json(download_url_candidates(url), extra, 120)
+
+
+async def resolve_video_title(
+    url: str,
+    current: str,
+    external_id: str = "",
+) -> str:
+    """Inspect a single video URL only when the stored/playlist title is unusable."""
+    current = (current or "").strip()
+    if is_usable_video_title(current, external_id):
+        return current
+    try:
+        info = await inspect_url(url)
+    except Exception:
+        return current
+    resolved = title_from_entry(info, str(info.get("id") or external_id))
+    return resolved or current
 
 
 async def inspect_playlist_flat(url: str) -> dict:

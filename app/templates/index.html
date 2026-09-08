@@ -57,7 +57,7 @@
     {% for v in recent %}
       <div class="row">
         <span>
-          <strong>{{ v.title }}</strong>
+          <strong>{{ v.display_title() }}</strong>
           <small>{{ v.channel }}</small>
         </span>
         <em class="status">{{ v.status }}</em>

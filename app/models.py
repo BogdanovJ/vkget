@@ -77,6 +77,14 @@ class Video(Base):
 
     subscription: Mapped[Subscription | None] = relationship(back_populates="videos")
 
+    def display_title(self) -> str:
+        from .ytdlp import is_usable_video_title
+
+        title = (self.title or "").strip()
+        if is_usable_video_title(title, self.external_id):
+            return title
+        return "Untitled"
+
 class AppState(Base):
     __tablename__ = "app_state"
 

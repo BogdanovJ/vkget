@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from app.main import templates
+from app.models import Video
 from app.ytdlp import to_vkvideo
 
 
@@ -75,6 +76,67 @@ class VkvideoFilterTests(unittest.TestCase):
         self.assertIn(f'href="{DISPLAY}"', html)
         self.assertIn('target="_blank"', html)
         self.assertIn('rel="noopener"', html)
+
+
+class FakeQueuedVideo:
+    channel = "Algebra"
+    attempts = 1
+    next_attempt_at = None
+    last_error = None
+    status = "QUEUED"
+
+    def __init__(self, title: str, external_id: str):
+        self._video = Video(
+            title=title,
+            external_id=external_id,
+            webpage_url=f"https://vk.com/video{external_id}",
+            channel=self.channel,
+            status=self.status,
+            attempts=self.attempts,
+        )
+
+    def display_title(self) -> str:
+        return self._video.display_title()
+
+
+class QueueTitleDisplayTests(unittest.TestCase):
+    def test_url_bit_title_displays_untitled_not_id(self):
+        video = Video(
+            title="-211437014_7",
+            external_id="-211437014_7",
+            webpage_url="https://vk.com/video-211437014_7",
+            channel="Algebra",
+            status="QUEUED",
+        )
+        self.assertEqual(video.display_title(), "Untitled")
+
+    def test_real_title_is_shown(self):
+        video = Video(
+            title="Lecture 4 — Linear maps",
+            external_id="-211437014_7",
+            webpage_url="https://vk.com/video-211437014_7",
+            channel="Algebra",
+            status="QUEUED",
+        )
+        self.assertEqual(video.display_title(), "Lecture 4 — Linear maps")
+
+    def test_queue_row_shows_human_title_and_channel(self):
+        html = templates.env.get_template("queue.html").render(
+            videos=[
+                FakeQueuedVideo("Lecture 4 — Linear maps", "-211437014_7"),
+            ]
+        )
+        self.assertIn("Lecture 4 — Linear maps", html)
+        self.assertIn("Algebra", html)
+        self.assertNotIn("-211437014_7", html)
+
+    def test_queue_hides_url_bit_title(self):
+        html = templates.env.get_template("queue.html").render(
+            videos=[FakeQueuedVideo("-211437014_7", "-211437014_7")]
+        )
+        self.assertIn("Untitled", html)
+        self.assertIn("Algebra", html)
+        self.assertNotIn("-211437014_7", html)
 
 
 if __name__ == "__main__":

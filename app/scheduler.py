@@ -12,7 +12,15 @@ from .db import SessionLocal
 from .filters import rejection_reason
 from .models import AppState, Subscription, Video
 from .notifier import notify
-from .ytdlp import PLACEHOLDER_TITLES, download_video, inspect_playlist_flat, label_from_url
+from .ytdlp import (
+    PLACEHOLDER_TITLES,
+    download_video,
+    inspect_playlist_flat,
+    is_usable_video_title,
+    label_from_url,
+    resolve_video_title,
+    title_from_entry,
+)
 
 def now():
     return datetime.now()
@@ -207,6 +215,8 @@ async def scan_subscription(subscription_id: int, initial: bool = False):
         skipped_existing = 0
         queued = 0
         ignored = 0
+        new_videos: list[dict] = []
+        inspect_indexes: list[int] = []
 
         for entry in entries:
             if not entry:
@@ -230,7 +240,15 @@ async def scan_subscription(subscription_id: int, initial: bool = False):
                 skipped_existing += 1
                 continue
 
-            video_title = entry.get("title") or f"Video {external_id}"
+            video_title = title_from_entry(entry, external_id)
+            if not video_title:
+                raw = (
+                    entry.get("title")
+                    or entry.get("fulltitle")
+                    or entry.get("alt_title")
+                    or ""
+                )
+                video_title = str(raw).strip() or f"Video {external_id}"
             duration = entry.get("duration")
             channel = (
                 entry.get("channel")
@@ -263,43 +281,97 @@ async def scan_subscription(subscription_id: int, initial: bool = False):
 
             if status == "QUEUED":
                 queued += 1
+                if not is_usable_video_title(video_title, external_id):
+                    inspect_indexes.append(len(new_videos))
             else:
                 ignored += 1
 
-            db.add(
-                Video(
-                    subscription_id=sub.id,
-                    source="vk",
-                    external_id=external_id,
-                    webpage_url=webpage_url,
-                    title=video_title[:1000],
-                    channel=channel[:500],
-                    duration=duration,
-                    upload_date=entry.get("upload_date"),
-                    status=status,
-                    ignore_reason=ignore_reason,
-                    next_attempt_at=(
+            new_videos.append(
+                {
+                    "subscription_id": sub.id,
+                    "source": "vk",
+                    "external_id": external_id,
+                    "webpage_url": webpage_url,
+                    "title": video_title[:1000],
+                    "channel": channel[:500],
+                    "duration": duration,
+                    "upload_date": entry.get("upload_date"),
+                    "status": status,
+                    "ignore_reason": ignore_reason,
+                    "next_attempt_at": (
                         now() + jitter_minutes(2, 15)
                         if status == "QUEUED"
                         else None
                     ),
-                )
+                }
             )
 
-        sub.last_scan_at = now()
-        sub.last_error = None
-        sub.last_scan_result = scan_summary(
+        scan_at = now()
+        result = scan_summary(
             entries=entries,
             skipped_incomplete=skipped_incomplete,
             skipped_existing=skipped_existing,
             queued=queued,
             ignored=ignored,
         )
-        sub.next_scan_at = now() + jitter_hours(
+        next_at = now() + jitter_hours(
             settings.discovery_min_hours,
             settings.discovery_max_hours,
         )
         db.commit()
+
+    for index in inspect_indexes:
+        row = new_videos[index]
+        row["title"] = (
+            await resolve_video_title(
+                row["webpage_url"],
+                row["title"],
+                row["external_id"],
+            )
+        )[:1000]
+
+    with SessionLocal() as db:
+        sub = db.get(Subscription, subscription_id)
+        if not sub:
+            return
+        for row in new_videos:
+            db.add(Video(**row))
+        sub.last_scan_at = scan_at
+        sub.last_error = None
+        sub.last_scan_result = result
+        sub.next_scan_at = next_at
+        db.commit()
+
+async def resolve_placeholder_queued_titles(limit: int = 1):
+    """Fill real titles for already-queued rows that still store URL bits."""
+    with SessionLocal() as db:
+        jobs = db.scalars(
+            select(Video)
+            .where(Video.status.in_(["QUEUED", "FAILED_TEMPORARY"]))
+            .order_by(Video.next_attempt_at.asc())
+            .limit(50)
+        ).all()
+        targets = []
+        for job in jobs:
+            if is_usable_video_title(job.title, job.external_id):
+                continue
+            targets.append((job.id, job.webpage_url, job.title, job.external_id))
+            if len(targets) >= limit:
+                break
+
+    for video_id, url, title, external_id in targets:
+        resolved = await resolve_video_title(url, title, external_id)
+        if not resolved or resolved == title:
+            continue
+        with SessionLocal() as db:
+            job = db.get(Video, video_id)
+            if (
+                job
+                and job.status in {"QUEUED", "FAILED_TEMPORARY"}
+                and not is_usable_video_title(job.title, job.external_id)
+            ):
+                job.title = resolved[:1000]
+                db.commit()
 
 async def run_one_download():
     with SessionLocal() as db:
@@ -448,6 +520,7 @@ async def scheduler_loop():
             for sub_id in due_ids:
                 await scan_subscription(sub_id)
 
+            await resolve_placeholder_queued_titles()
             await run_one_download()
 
         except Exception as exc:

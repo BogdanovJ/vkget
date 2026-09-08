@@ -21,7 +21,14 @@ from .scheduler import (
     get_global_cooldown,
     now
 )
-from .ytdlp import inspect_url, label_from_url, normalize_vk_url, to_vkvideo
+from .ytdlp import (
+    inspect_url,
+    label_from_url,
+    normalize_vk_url,
+    resolve_video_title,
+    title_from_entry,
+    to_vkvideo,
+)
 
 app = FastAPI(title="VKGET")
 templates = Jinja2Templates(directory="app/templates")
@@ -109,7 +116,7 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
             ready_at = cooldown
         next_download = {
             "when": format_when(ready_at, current),
-            "title": next_download_video.title,
+            "title": next_download_video.display_title(),
         }
 
     return templates.TemplateResponse(
@@ -216,11 +223,16 @@ async def add_one_off(
     if existing:
         return RedirectResponse("/queue", status_code=303)
 
+    video_title = title_from_entry(data, external_id)
+    if not video_title:
+        raw = data.get("title") or data.get("fulltitle") or data.get("alt_title") or ""
+        video_title = str(raw).strip() or f"Video {external_id}"
+
     video = Video(
         source="vk",
         external_id=external_id,
         webpage_url=data.get("webpage_url") or normalized,
-        title=(data.get("title") or external_id)[:1000],
+        title=video_title[:1000],
         channel=(
             data.get("channel")
             or data.get("uploader")
@@ -306,7 +318,7 @@ async def scan_now(sub_id: int):
     )
 
 @app.post("/videos/{video_id}/download")
-def force_download(
+async def force_download(
     video_id: int,
     db: Session = Depends(get_db),
 ):
@@ -317,11 +329,22 @@ def force_download(
     video.status = "QUEUED"
     video.ignore_reason = None
     video.next_attempt_at = datetime.now()
+    webpage_url = video.webpage_url
+    current_title = video.title
+    external_id = video.external_id
+    subscription_id = video.subscription_id
     db.commit()
 
+    resolved = await resolve_video_title(webpage_url, current_title, external_id)
+    if resolved and resolved != current_title:
+        video = db.get(Video, video_id)
+        if video:
+            video.title = resolved[:1000]
+            db.commit()
+
     target = (
-        f"/subscriptions/{video.subscription_id}"
-        if video.subscription_id
+        f"/subscriptions/{subscription_id}"
+        if subscription_id
         else "/queue"
     )
     return RedirectResponse(target, status_code=303)

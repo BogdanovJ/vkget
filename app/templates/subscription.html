@@ -59,7 +59,7 @@
   {% for v in videos %}
   <div class="row catalogue">
     <span>
-      <strong>{{ v.title }}</strong>
+      <strong>{{ v.display_title() }}</strong>
       <small>
         {% if v.duration %}{{ (v.duration // 60) }}M {{ (v.duration % 60) }}S · {% endif %}
         {{ v.status }}
