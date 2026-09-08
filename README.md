@@ -33,9 +33,10 @@ It is mounted read-only at `/config/cookies.txt`.
 ## Deploy
 
 1. Push to `main`. GitHub Actions builds `linux/arm64` and publishes `ghcr.io/bogdanovj/vkget:latest`.
-2. Restart the workload yourself so it pulls the new image, e.g. `kubectl -n vkget rollout restart deploy/vkget`.
-3. Create the MariaDB database/user with `sql/bootstrap.sql`.
-4. Create SOPS secrets from the examples in `k8s/`.
-5. Set the storage node selector in `k8s/deployment.yaml`.
-6. Change the image reference.
-7. Apply with Flux/Kustomize.
+2. First time only: open the [vkget package settings](https://github.com/users/BogdanovJ/packages/container/vkget/settings), under **Manage Actions access** add the `BogdanovJ/vkget` repository with **Write**, then re-run the Publish workflow.
+3. Restart the workload yourself so it pulls the new image, e.g. `kubectl -n vkget rollout restart deploy/vkget`.
+4. Create the MariaDB database/user with `sql/bootstrap.sql`.
+5. Create SOPS secrets from the examples in `k8s/`.
+6. Set the storage node selector in `k8s/deployment.yaml`.
+7. Change the image reference.
+8. Apply with Flux/Kustomize.

@@ -8,6 +8,8 @@ RUN apt-get update \
  && curl -fsSL "https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp" -o /usr/local/bin/yt-dlp \
  && chmod +x /usr/local/bin/yt-dlp
 
+LABEL org.opencontainers.image.source="https://github.com/BogdanovJ/vkget"
+
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
