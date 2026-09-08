@@ -4,7 +4,7 @@
   <div>
     <div class="eyebrow">SUBSCRIPTION #{{ sub.id }}</div>
     <h1>{{ sub.display_title() }}</h1>
-    <p class="muted">{{ sub.source_url }}</p>
+    <p class="muted"><a href="{{ sub.source_url|vkvideo }}" target="_blank" rel="noopener">{{ sub.source_url|vkvideo }}</a></p>
   </div>
 
   <form method="post" action="/subscriptions/{{ sub.id }}/scan">

@@ -21,7 +21,7 @@ from .scheduler import (
     get_global_cooldown,
     now
 )
-from .ytdlp import inspect_url, label_from_url, normalize_vk_url
+from .ytdlp import inspect_url, label_from_url, normalize_vk_url, to_vkvideo
 
 app = FastAPI(title="VKGET")
 templates = Jinja2Templates(directory="app/templates")
@@ -44,6 +44,7 @@ def format_when(value: datetime | None, current: datetime | None = None) -> str:
 
 templates.env.filters["stamp"] = format_stamp
 templates.env.filters["when"] = format_when
+templates.env.filters["vkvideo"] = to_vkvideo
 
 @app.on_event("startup")
 async def startup():
