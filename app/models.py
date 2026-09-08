@@ -23,6 +23,7 @@ class Subscription(Base):
     next_scan_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     title_is_custom: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_scan_result: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     videos: Mapped[list["Video"]] = relationship(
         back_populates="subscription",
@@ -36,6 +37,16 @@ class Subscription(Base):
         if title not in PLACEHOLDER_TITLES:
             return title
         return label_from_url(self.source_url)
+
+    def has_custom_title(self) -> bool:
+        from .ytdlp import PLACEHOLDER_TITLES, label_from_url
+
+        if self.title_is_custom:
+            return True
+        title = (self.title or "").strip()
+        if title in PLACEHOLDER_TITLES:
+            return False
+        return title != label_from_url(self.source_url)
 
 class Video(Base):
     __tablename__ = "videos"

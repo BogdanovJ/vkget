@@ -117,22 +117,55 @@ def recover_interrupted_downloads():
 
         db.commit()
 
+def scan_summary(
+    *,
+    entries: list,
+    skipped_incomplete: int,
+    skipped_existing: int,
+    queued: int,
+    ignored: int,
+) -> str:
+    if not entries:
+        return "EMPTY PLAYLIST"
+    if queued == 0 and ignored == 0 and skipped_incomplete == 0:
+        if skipped_existing:
+            return f"NO NEW VIDEOS · {skipped_existing} already known"
+        return "NO NEW VIDEOS"
+    parts = []
+    if queued:
+        parts.append(f"QUEUED {queued}")
+    if ignored:
+        parts.append(f"IGNORED {ignored}")
+    if skipped_existing:
+        parts.append(f"KNOWN {skipped_existing}")
+    if skipped_incomplete:
+        parts.append(f"SKIPPED {skipped_incomplete}")
+    if queued:
+        return " · ".join(parts)
+    return "NO NEW DOWNLOADS · " + " · ".join(parts)
+
 async def scan_subscription(subscription_id: int, initial: bool = False):
     with SessionLocal() as db:
         sub = db.get(Subscription, subscription_id)
-        if not sub or not sub.enabled:
+        if not sub:
+            return
+        if not sub.enabled:
+            sub.last_scan_result = "SKIPPED · DISABLED"
+            db.commit()
             return
         source_url = sub.source_url
 
     try:
         data = await inspect_playlist_flat(source_url)
     except Exception as exc:
+        short = str(exc).strip().splitlines()[0][:180] or "scan error"
         with SessionLocal() as db:
             sub = db.get(Subscription, subscription_id)
             if sub:
                 if (sub.title or "").strip() in PLACEHOLDER_TITLES:
                     sub.title = label_from_url(sub.source_url)
                 sub.last_error = str(exc)[:2000]
+                sub.last_scan_result = f"FAILED · {short}"
                 sub.last_scan_at = now()
                 sub.next_scan_at = now() + jitter_hours(
                     settings.discovery_min_hours,
@@ -154,7 +187,7 @@ async def scan_subscription(subscription_id: int, initial: bool = False):
         if not sub:
             return
 
-        if not sub.title_is_custom:
+        if not sub.has_custom_title():
             sub.title = title[:500]
 
         known = db.scalar(
@@ -170,14 +203,21 @@ async def scan_subscription(subscription_id: int, initial: bool = False):
                 if entry and entry.get("id"):
                     initial_allowed.add(str(entry["id"]))
 
+        skipped_incomplete = 0
+        skipped_existing = 0
+        queued = 0
+        ignored = 0
+
         for entry in entries:
             if not entry:
+                skipped_incomplete += 1
                 continue
 
             external_id = str(entry.get("id") or "")
             webpage_url = entry.get("webpage_url") or entry.get("url")
 
             if not external_id or not webpage_url:
+                skipped_incomplete += 1
                 continue
 
             existing = db.scalar(
@@ -187,6 +227,7 @@ async def scan_subscription(subscription_id: int, initial: bool = False):
                 )
             )
             if existing:
+                skipped_existing += 1
                 continue
 
             video_title = entry.get("title") or f"Video {external_id}"
@@ -220,6 +261,11 @@ async def scan_subscription(subscription_id: int, initial: bool = False):
                 else:
                     status = "QUEUED"
 
+            if status == "QUEUED":
+                queued += 1
+            else:
+                ignored += 1
+
             db.add(
                 Video(
                     subscription_id=sub.id,
@@ -242,6 +288,13 @@ async def scan_subscription(subscription_id: int, initial: bool = False):
 
         sub.last_scan_at = now()
         sub.last_error = None
+        sub.last_scan_result = scan_summary(
+            entries=entries,
+            skipped_incomplete=skipped_incomplete,
+            skipped_existing=skipped_existing,
+            queued=queued,
+            ignored=ignored,
+        )
         sub.next_scan_at = now() + jitter_hours(
             settings.discovery_min_hours,
             settings.discovery_max_hours,
@@ -286,12 +339,20 @@ async def run_one_download():
         url = job.webpage_url
         channel = job.channel
         title = job.title
+        external_id = job.external_id
+        upload_date = job.upload_date
         attempts = job.attempts
 
         db.commit()
 
     try:
-        rc, final_path, log = await download_video(url, channel)
+        rc, final_path, log = await download_video(
+            url,
+            channel,
+            title=title,
+            video_id=external_id,
+            upload_date=upload_date,
+        )
     except Exception as exc:
         retry_at = retry_time(attempts, "TRANSIENT")
 

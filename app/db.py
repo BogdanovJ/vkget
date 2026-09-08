@@ -27,6 +27,12 @@ def ensure_schema():
                     "ADD COLUMN title_is_custom BOOLEAN NOT NULL DEFAULT 0"
                 )
             )
+        columns.add("title_is_custom")
+    if "last_scan_result" not in columns:
+        with engine.begin() as conn:
+            conn.execute(
+                text("ALTER TABLE subscriptions ADD COLUMN last_scan_result TEXT NULL")
+            )
 
 def get_db():
     db = SessionLocal()
