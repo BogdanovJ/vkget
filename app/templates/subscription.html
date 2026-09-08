@@ -14,9 +14,33 @@
 
 <section class="panel meta">
   <span>INITIAL: LAST {{ sub.initial_last_n }}</span>
-  <span>MIN: {{ sub.min_duration_seconds // 60 }} MIN</span>
-  <span>FUTURE: {{ "YES" if sub.watch_future else "NO" }}</span>
-  <span>NEXT: {{ sub.next_scan_at or "—" }}</span>
+  <span>NEXT: {{ sub.next_scan_at|when if sub.enabled else "NONE" }}</span>
+</section>
+
+<section class="panel">
+  <h2>PROFILE</h2>
+  <form method="post" action="/subscriptions/{{ sub.id }}/profile">
+    <label>NAME</label>
+    <input name="name" value="{{ sub.display_title() }}" placeholder="Leave blank to use the URL">
+
+    <label>MINIMUM LENGTH (MINUTES)</label>
+    <input type="number" name="min_duration_minutes" min="0" value="{{ sub.min_duration_seconds // 60 }}">
+
+    <label>EXTRA STOP WORDS · ONE PER LINE</label>
+    <textarea name="stop_words" rows="5" placeholder="channel-specific words">{{ sub.extra_stop_words }}</textarea>
+
+    <label class="check">
+      <input type="checkbox" name="enabled"{% if sub.enabled %} checked{% endif %}>
+      ENABLED
+    </label>
+
+    <label class="check">
+      <input type="checkbox" name="watch_future"{% if sub.watch_future %} checked{% endif %}>
+      WATCH FUTURE VIDEOS
+    </label>
+
+    <button>SAVE PROFILE</button>
+  </form>
 </section>
 
 <section class="panel">
