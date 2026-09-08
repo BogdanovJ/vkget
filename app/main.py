@@ -263,6 +263,39 @@ def subscription_detail(
         },
     )
 
+@app.post("/subscriptions/{sub_id}/profile")
+def update_subscription_profile(
+    sub_id: int,
+    name: str = Form(""),
+    min_duration_minutes: int = Form(10),
+    stop_words: str = Form(""),
+    watch_future: str | None = Form(None),
+    enabled: str | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    sub = db.get(Subscription, sub_id)
+    if not sub:
+        raise HTTPException(404)
+
+    custom_name = (name or "").strip()
+    if custom_name:
+        sub.title = custom_name[:500]
+        sub.title_is_custom = True
+    else:
+        sub.title = label_from_url(sub.source_url)
+        sub.title_is_custom = False
+
+    sub.min_duration_seconds = max(min_duration_minutes, 0) * 60
+    sub.extra_stop_words = stop_words
+    sub.watch_future = watch_future == "on"
+    sub.enabled = enabled == "on"
+    db.commit()
+
+    return RedirectResponse(
+        f"/subscriptions/{sub_id}",
+        status_code=303,
+    )
+
 @app.post("/subscriptions/{sub_id}/scan")
 async def scan_now(sub_id: int):
     await scan_subscription(sub_id)
