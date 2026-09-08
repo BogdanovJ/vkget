@@ -15,19 +15,32 @@
   <div class="stat"><b>{{ counts.completed }}</b><span>DONE</span></div>
 </div>
 
-{% if cooldown %}
-<div class="notice">
-    GLOBAL COOLDOWN UNTIL {{ cooldown }}
+<div class="schedule">
+  <div class="schedule-item">
+    <em>NEXT SCAN</em>
+    <b>{{ next_scan.when }}</b>
+    {% if next_scan.title %}
+    <small>{{ next_scan.title }}</small>
+    {% endif %}
+  </div>
+  <div class="schedule-item">
+    <em>NEXT DOWNLOAD</em>
+    <b>{{ next_download.when }}</b>
+    {% if next_download.title %}
+    <small>{{ next_download.title }}</small>
+    {% endif %}
+  </div>
 </div>
-{% endif %}
-
 
 <div class="grid">
   <section class="panel">
     <h2>SUBSCRIPTIONS</h2>
     {% for s in subs %}
       <a class="row" href="/subscriptions/{{ s.id }}">
-        <span>{{ s.title }}</span>
+        <span>
+          {{ s.title }}
+          <small>NEXT SCAN: {{ s.next_scan_at|when if s.enabled else "NONE" }}</small>
+        </span>
         <small>{{ "ON" if s.enabled else "OFF" }}</small>
       </a>
     {% else %}

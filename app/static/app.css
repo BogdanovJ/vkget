@@ -145,6 +145,40 @@ h2{
   color:var(--accent);
 }
 
+.schedule{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  border:2px solid var(--fg);
+  margin-bottom:24px;
+}
+
+.schedule-item{
+  padding:18px 22px;
+  border-right:2px solid var(--fg);
+}
+
+.schedule-item:last-child{border-right:0}
+
+.schedule-item em{
+  display:block;
+  font-style:normal;
+  font-size:10px;
+  letter-spacing:1.5px;
+  color:var(--accent);
+}
+
+.schedule-item b{
+  display:block;
+  font-size:22px;
+  margin:6px 0 4px;
+}
+
+.schedule-item small{
+  display:block;
+  font-size:11px;
+  opacity:.7;
+}
+
 .meta{
   display:flex;
   gap:22px;
@@ -211,6 +245,9 @@ footer{
   .stats{grid-template-columns:1fr 1fr}
   .stat:nth-child(2){border-right:0}
   .stat{border-bottom:2px solid var(--fg)}
+  .schedule{grid-template-columns:1fr}
+  .schedule-item{border-right:0;border-bottom:2px solid var(--fg)}
+  .schedule-item:last-child{border-bottom:0}
   nav{gap:10px}
   .topbar{padding:0 14px}
   .shell{padding:24px 14px 50px}
