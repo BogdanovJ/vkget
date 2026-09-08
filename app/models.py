@@ -22,11 +22,20 @@ class Subscription(Base):
     last_scan_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     next_scan_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title_is_custom: Mapped[bool] = mapped_column(Boolean, default=False)
 
     videos: Mapped[list["Video"]] = relationship(
         back_populates="subscription",
         cascade="all, delete-orphan",
     )
+
+    def display_title(self) -> str:
+        from .ytdlp import PLACEHOLDER_TITLES, label_from_url
+
+        title = (self.title or "").strip()
+        if title not in PLACEHOLDER_TITLES:
+            return title
+        return label_from_url(self.source_url)
 
 class Video(Base):
     __tablename__ = "videos"

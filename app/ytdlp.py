@@ -10,7 +10,12 @@ import tempfile
 
 from pathlib import Path
 
+from urllib.parse import unquote, urlparse
+
 from .config import settings
+
+PLACEHOLDER_TITLES = {"", "Scanning…", "Scanning...", "Subscription"}
+
 
 def normalize_vk_url(url: str) -> str:
     url = url.strip()
@@ -19,6 +24,19 @@ def normalize_vk_url(url: str) -> str:
     if url.startswith("http://vkvideo.ru/"):
         return "https://vk.com/" + url.removeprefix("http://vkvideo.ru/")
     return url
+
+
+def label_from_url(url: str) -> str:
+    normalized = normalize_vk_url(url or "")
+    parsed = urlparse(normalized)
+    parts = [p for p in unquote(parsed.path or "").strip("/").split("/") if p]
+    for part in reversed(parts):
+        if part.startswith("@"):
+            return part[:500]
+    if parts:
+        return parts[-1][:500]
+    host_path = f"{parsed.netloc}{parsed.path}".strip("/")
+    return (host_path or normalized or "Subscription")[:500]
 
 async def _run(args: list[str], timeout: int | None = None):
     proc = await asyncio.create_subprocess_exec(

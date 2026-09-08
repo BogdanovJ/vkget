@@ -12,7 +12,7 @@ from .db import SessionLocal
 from .filters import rejection_reason
 from .models import AppState, Subscription, Video
 from .notifier import notify
-from .ytdlp import download_video, inspect_playlist_flat
+from .ytdlp import PLACEHOLDER_TITLES, download_video, inspect_playlist_flat, label_from_url
 
 def now():
     return datetime.now()
@@ -130,6 +130,8 @@ async def scan_subscription(subscription_id: int, initial: bool = False):
         with SessionLocal() as db:
             sub = db.get(Subscription, subscription_id)
             if sub:
+                if (sub.title or "").strip() in PLACEHOLDER_TITLES:
+                    sub.title = label_from_url(sub.source_url)
                 sub.last_error = str(exc)[:2000]
                 sub.last_scan_at = now()
                 sub.next_scan_at = now() + jitter_hours(
@@ -152,7 +154,8 @@ async def scan_subscription(subscription_id: int, initial: bool = False):
         if not sub:
             return
 
-        sub.title = title[:500]
+        if not sub.title_is_custom:
+            sub.title = title[:500]
 
         known = db.scalar(
             select(Video.id)
