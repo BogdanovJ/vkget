@@ -40,7 +40,7 @@ Pasted URLs keep their host when saved. A `vkvideo.ru` subscription stays `vkvid
 
 VK/vkvideo sometimes show a JavaScript/cookie challenge similar to Cloudflare. [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) drives a browser, tries to clear that challenge, and returns cookies.
 
-Set `FLARESOLVERR_URL` (for example `http://flaresolverr:8191`) to enable it. Leave it empty (the default) so existing deploys stay unchanged.
+FlareSolverr is expected in-cluster at `http://flaresolverr.flaresolverr.svc.cluster.local:8191`. That is the `FLARESOLVERR_URL` default; override it if needed, or set it empty to disable.
 
 When a scan or download hits 403 / challenge-style errors, vkget asks FlareSolverr for cookies for that URL and retries yt-dlp with those cookies plus any existing `cookies.txt`.
 
@@ -52,9 +52,7 @@ Example sidecar/service (documentation only — not part of the bundled manifest
 docker run -d --name flaresolverr -p 8191:8191 ghcr.io/flaresolverr/flaresolverr:latest
 ```
 
-On k3s, run FlareSolverr as a Deployment/Service in the same namespace and set `FLARESOLVERR_URL=http://flaresolverr:8191` on the vkget ConfigMap. No sidecar is required.
-
-FlareSolverr is expected in-cluster at `http://flaresolverr.flaresolverr.svc.cluster.local:8191`.
+On k3s, run FlareSolverr as a Deployment/Service; the ConfigMap already points at that in-cluster URL. No sidecar is required.
 
 ## Deploy
 

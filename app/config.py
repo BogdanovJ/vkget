@@ -30,11 +30,10 @@ class Settings:
     discovery_max_hours: int = int(os.getenv("DISCOVERY_INTERVAL_MAX_HOURS", "6"))
     telegram_bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     telegram_chat_id: str = os.getenv("TELEGRAM_CHAT_ID", "")
-    flaresolverr_url: str = os.getenv("FLARESOLVERR_URL", "").strip()
     flaresolverr_url: str = os.getenv(
         "FLARESOLVERR_URL",
         "http://flaresolverr.flaresolverr.svc.cluster.local:8191",
-    )
+    ).strip()
 
 
 settings = Settings()
