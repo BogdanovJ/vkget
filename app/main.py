@@ -27,6 +27,24 @@ app = FastAPI(title="VKGET")
 templates = Jinja2Templates(directory="app/templates")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
+
+def format_stamp(value: datetime | None) -> str:
+    if value is None:
+        return "NONE"
+    return value.strftime("%d %b, %H:%M")
+
+
+def format_when(value: datetime | None, current: datetime | None = None) -> str:
+    if value is None:
+        return "NONE"
+    if value <= (current or now()):
+        return "NOW"
+    return format_stamp(value)
+
+
+templates.env.filters["stamp"] = format_stamp
+templates.env.filters["when"] = format_when
+
 @app.on_event("startup")
 async def startup():
     Base.metadata.create_all(engine)
@@ -58,10 +76,40 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
         select(Subscription).order_by(Subscription.created_at.desc()).limit(8)
     ).all()
 
+    current = now()
     cooldown = get_global_cooldown(db)
-
-    if cooldown and cooldown <= now():
+    if cooldown and cooldown <= current:
         cooldown = None
+
+    next_scan_sub = db.scalars(
+        select(Subscription)
+        .where(
+            Subscription.enabled.is_(True),
+            Subscription.next_scan_at.is_not(None),
+        )
+        .order_by(Subscription.next_scan_at.asc())
+        .limit(1)
+    ).first()
+
+    next_download_video = db.scalars(
+        select(Video)
+        .where(Video.status.in_(["QUEUED", "FAILED_TEMPORARY"]))
+        .order_by(Video.next_attempt_at.asc())
+        .limit(1)
+    ).first()
+
+    if counts["downloading"]:
+        next_download = {"when": "IN PROGRESS", "title": None}
+    elif not next_download_video:
+        next_download = {"when": "NONE", "title": None}
+    else:
+        ready_at = next_download_video.next_attempt_at or current
+        if cooldown and cooldown > ready_at:
+            ready_at = cooldown
+        next_download = {
+            "when": format_when(ready_at, current),
+            "title": next_download_video.title,
+        }
 
     return templates.TemplateResponse(
         request=request,
@@ -70,11 +118,16 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
             "counts": counts,
             "recent": recent,
             "subs": subs,
-            "cooldown": (
-                cooldown.strftime("%d %b, %H:%M")
-                if cooldown
-                else None
-            ),
+            "next_scan": {
+                "when": (
+                    format_when(next_scan_sub.next_scan_at, current)
+                    if next_scan_sub
+                    else "NONE"
+                ),
+                "title": next_scan_sub.title if next_scan_sub else None,
+                "id": next_scan_sub.id if next_scan_sub else None,
+            },
+            "next_download": next_download,
             "max_height": settings.max_height,
         },
     )
