@@ -17,6 +17,11 @@ class FakeSub:
     next_scan_at = None
     last_scan_at = None
     last_scan_result = None
+    last_error = None
+    initial_last_n = 3
+    min_duration_seconds = 600
+    extra_stop_words = ""
+    watch_future = True
 
     def display_title(self) -> str:
         return "Playlist"
