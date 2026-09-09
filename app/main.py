@@ -311,6 +311,19 @@ def update_subscription_profile(
         status_code=303,
     )
 
+@app.post("/subscriptions/{sub_id}/delete")
+def delete_subscription(
+    sub_id: int,
+    db: Session = Depends(get_db),
+):
+    sub = db.get(Subscription, sub_id)
+    if not sub:
+        raise HTTPException(404)
+
+    db.delete(sub)
+    db.commit()
+    return RedirectResponse("/subscriptions", status_code=303)
+
 @app.post("/subscriptions/{sub_id}/scan")
 async def scan_now(sub_id: int):
     await scan_subscription(sub_id)

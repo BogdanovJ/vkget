@@ -224,6 +224,18 @@ button,.buttonlike{
   cursor:pointer;
 }
 
+button.danger{
+  background:transparent;
+  color:var(--fg);
+  border:2px solid var(--fg);
+  width:fit-content;
+}
+
+button.danger:hover{
+  border-color:var(--accent);
+  color:var(--accent);
+}
+
 button.small{
   padding:7px 9px;
   font-size:10px;

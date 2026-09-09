@@ -54,6 +54,14 @@
 </section>
 
 <section class="panel">
+  <h2>REMOVE</h2>
+  <p class="muted">Stops tracking this source and drops its catalogue rows. Downloaded files stay on disk.</p>
+  <form method="post" action="/subscriptions/{{ sub.id }}/delete" onsubmit="return confirm('Delete this subscription? Tracking stops. Downloaded files stay on disk.');">
+    <button class="danger">DELETE SUBSCRIPTION</button>
+  </form>
+</section>
+
+<section class="panel">
   <h2>CATALOGUE</h2>
 
   {% for v in videos %}
