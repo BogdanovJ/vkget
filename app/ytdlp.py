@@ -567,6 +567,137 @@ def safe_component(value: str, *, default: str = "Unknown") -> str:
     return value[:180].strip(" .") or default
 
 
+def download_format(max_height: int) -> str:
+    """Prefer H.264 + AAC MP4 so Samsung TVs can play the file."""
+    h = int(max_height)
+    return "/".join(
+        [
+            f"best[ext=mp4][vcodec^=avc][height<={h}]",
+            f"best[ext=mp4][vcodec^=h264][height<={h}]",
+            f"bestvideo[vcodec^=avc1][height<={h}]+bestaudio[acodec^=mp4a]",
+            f"bestvideo[vcodec^=avc][height<={h}]+bestaudio[acodec^=mp4a]",
+            f"bestvideo[vcodec^=avc1][height<={h}]+bestaudio",
+            f"bestvideo[vcodec^=h264][height<={h}]+bestaudio",
+            f"best[ext=mp4][height<={h}]",
+            f"bestvideo[height<={h}]+bestaudio",
+            f"best[height<={h}]",
+            "best",
+        ]
+    )
+
+
+TV_VIDEO_CODECS = frozenset({"h264"})
+TV_AUDIO_CODECS = frozenset({"aac"})
+TV_PIXEL_FORMATS = frozenset({"yuv420p", "yuvj420p"})
+
+
+def _probe_streams(probe: dict) -> tuple[dict | None, dict | None]:
+    streams = probe.get("streams") or []
+    video = next((s for s in streams if s.get("codec_type") == "video"), None)
+    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    return video, audio
+
+
+def tv_codec_plan(probe: dict) -> dict[str, bool]:
+    video, audio = _probe_streams(probe)
+    vcodec = (video or {}).get("codec_name") or ""
+    pix = ((video or {}).get("pix_fmt") or "yuv420p").lower()
+    acodec = (audio or {}).get("codec_name") or ""
+    video_ok = bool(video) and vcodec.lower() in TV_VIDEO_CODECS and pix in TV_PIXEL_FORMATS
+    has_audio = audio is not None
+    audio_ok = (not has_audio) or acodec.lower() in TV_AUDIO_CODECS
+    return {
+        "has_video": video is not None,
+        "has_audio": has_audio,
+        "copy_video": video_ok,
+        "copy_audio": has_audio and audio_ok,
+    }
+
+
+def ffmpeg_tv_args(src: str, dest: str, probe: dict) -> list[str]:
+    plan = tv_codec_plan(probe)
+    args = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        src,
+        "-map",
+        "0:v:0",
+    ]
+    if plan["has_audio"]:
+        args += ["-map", "0:a:0"]
+    args += ["-sn", "-dn"]
+    if plan["copy_video"]:
+        args += ["-c:v", "copy"]
+    else:
+        args += [
+            "-c:v",
+            "libx264",
+            "-preset",
+            "fast",
+            "-crf",
+            "20",
+            "-pix_fmt",
+            "yuv420p",
+            "-profile:v",
+            "high",
+            "-level",
+            "4.0",
+        ]
+    if plan["has_audio"]:
+        if plan["copy_audio"]:
+            args += ["-c:a", "copy"]
+        else:
+            args += ["-c:a", "aac", "-b:a", "160k", "-ac", "2", "-ar", "48000"]
+    args += ["-movflags", "+faststart", "-f", "mp4", dest]
+    return args
+
+
+async def probe_media(path: str) -> dict:
+    rc, out, err = await _run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=format_name:stream=codec_type,codec_name,pix_fmt",
+            "-of",
+            "json",
+            path,
+        ],
+        timeout=60,
+    )
+    if rc != 0:
+        raise RuntimeError(err.strip() or out.strip() or "ffprobe failed")
+    return json.loads(out or "{}")
+
+
+async def ensure_tv_compatible(path: str) -> str:
+    """Remux or transcode to H.264/AAC MP4 with faststart for Smart TVs."""
+    src = Path(path)
+    if not src.is_file():
+        return path
+    probe = await probe_media(str(src))
+    if not tv_codec_plan(probe)["has_video"]:
+        raise RuntimeError("downloaded file has no video stream")
+    dest = src.with_name(f"{src.stem}.compat.mp4")
+    rc, out, err = await _run(ffmpeg_tv_args(str(src), str(dest), probe), timeout=2 * 60 * 60)
+    if rc != 0:
+        try:
+            dest.unlink()
+        except OSError:
+            pass
+        raise RuntimeError(err.strip() or out.strip() or "ffmpeg failed")
+    final = src if src.suffix.lower() == ".mp4" else src.with_suffix(".mp4")
+    dest.replace(final)
+    if final != src and src.exists():
+        try:
+            src.unlink()
+        except OSError:
+            pass
+    return str(final)
+
+
 async def _download_once(
     url: str,
     output: str,
@@ -580,6 +711,7 @@ async def _download_once(
         args += [
             "--format", fmt,
             "--merge-output-format", "mp4",
+            "--remux-video", "mp4",
             "--concurrent-fragments", "1",
             "--limit-rate", settings.download_rate,
             "--retries", "3",
@@ -624,15 +756,20 @@ async def download_video(
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output = str(output_path)
-
-    fmt = (
-        f"bestvideo[height<={settings.max_height}]+bestaudio/"
-        f"best[height<={settings.max_height}]/best"
-    )
+    fmt = download_format(settings.max_height)
 
     last_rc = 1
     last_path = None
     last_log = ""
+
+    async def _finish(rc, final_path, log):
+        if rc != 0:
+            return rc, final_path, log
+        try:
+            tv_path = await ensure_tv_compatible(final_path or "")
+        except Exception as exc:
+            return 1, final_path, f"{log}\nTV compatible encode failed: {exc}".strip()
+        return rc, tv_path, log
 
     for candidate in download_url_candidates(url):
         try:
@@ -644,7 +781,7 @@ async def download_video(
             continue
 
         if rc == 0:
-            return rc, final_path, log
+            return await _finish(rc, final_path, log)
 
         last_rc, last_path, last_log = rc, final_path, log
         if not (flaresolverr_enabled() and looks_like_bot_protection(log)):
@@ -667,7 +804,7 @@ async def download_video(
             continue
 
         if rc == 0:
-            return rc, final_path, log
+            return await _finish(rc, final_path, log)
         last_rc, last_path, last_log = rc, final_path, log
 
     return last_rc, last_path, last_log

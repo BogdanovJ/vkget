@@ -9,6 +9,7 @@ Features:
 - future discovery with remembered history
 - duration and stop-word filtering
 - hard 720p ceiling
+- H.264/AAC MP4 for Smart TV playback
 - one active download at a time
 - randomized discovery/retry scheduling
 - MariaDB persistence
@@ -24,6 +25,8 @@ Kubernetes mounts the node's existing `/mnt/downloads` to `/downloads`.
 Subscription downloads go in one folder named after the subscription:
 
 `/downloads/{subscription}/{YYYY-MM-DD} - {title} [{id}].mp4`
+
+Files are remuxed or transcoded to H.264 + AAC in MP4 with faststart so Samsung Smart TVs can play them. VP9/AV1/Opus sources are converted.
 
 One-off downloads use the uploader name, or `_single`. Placeholder leftovers (`Subscription`, `Unknown`, `NA`) are never used as folder names. If the upload date is unknown, the date prefix is omitted instead of writing `NA`.
 
