@@ -76,6 +76,8 @@ class VkvideoFilterTests(unittest.TestCase):
         self.assertIn(f'href="{DISPLAY}"', html)
         self.assertIn('target="_blank"', html)
         self.assertIn('rel="noopener"', html)
+        self.assertIn('action="/subscriptions/1/delete"', html)
+        self.assertIn("DELETE SUBSCRIPTION", html)
 
 
 class FakeQueuedVideo:
