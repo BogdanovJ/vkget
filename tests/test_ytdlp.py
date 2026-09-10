@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
 import unittest
@@ -9,8 +10,10 @@ from app.ytdlp import (
     _netscape_cookie_line,
     build_download_output,
     download_folder_name,
+    download_format,
     download_stem,
     download_url_candidates,
+    ffmpeg_tv_args,
     format_upload_date,
     label_from_url,
     looks_like_bot_protection,
@@ -19,6 +22,7 @@ from app.ytdlp import (
     scan_url_candidates,
     to_vk_com,
     to_vkvideo,
+    tv_codec_plan,
 )
 
 
@@ -433,6 +437,112 @@ class DownloadOutputWireTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("2024-01-15 - Lecture 4 [-1_2].%(ext)s", outputs[0])
         self.assertNotIn("/VK Uploader/", outputs[0])
         self.assertTrue(path.endswith("2024-01-15 - Lecture 4 [-1_2].mp4"))
+
+
+class TvCompatibleTests(unittest.TestCase):
+    def test_format_prefers_h264_aac(self):
+        fmt = download_format(720)
+        self.assertTrue(fmt.startswith("best[ext=mp4][vcodec^=avc][height<=720]"))
+        self.assertIn("bestvideo[vcodec^=avc1][height<=720]+bestaudio[acodec^=mp4a]", fmt)
+        self.assertIn("bestvideo[height<=720]+bestaudio", fmt)
+        avc_at = fmt.find("vcodec^=avc")
+        any_at = fmt.find("bestvideo[height<=720]+bestaudio")
+        self.assertLess(avc_at, any_at)
+
+    def test_plan_copies_h264_aac(self):
+        plan = tv_codec_plan(
+            {
+                "streams": [
+                    {"codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p"},
+                    {"codec_type": "audio", "codec_name": "aac"},
+                ]
+            }
+        )
+        self.assertTrue(plan["copy_video"])
+        self.assertTrue(plan["copy_audio"])
+        args = ffmpeg_tv_args("in.mp4", "out.mp4", {
+            "streams": [
+                {"codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p"},
+                {"codec_type": "audio", "codec_name": "aac"},
+            ]
+        })
+        self.assertIn("-c:v", args)
+        self.assertEqual(args[args.index("-c:v") + 1], "copy")
+        self.assertEqual(args[args.index("-c:a") + 1], "copy")
+        self.assertIn("+faststart", args)
+
+    def test_plan_transcodes_vp9_opus(self):
+        probe = {
+            "streams": [
+                {"codec_type": "video", "codec_name": "vp9", "pix_fmt": "yuv420p"},
+                {"codec_type": "audio", "codec_name": "opus"},
+            ]
+        }
+        plan = tv_codec_plan(probe)
+        self.assertFalse(plan["copy_video"])
+        self.assertFalse(plan["copy_audio"])
+        args = ffmpeg_tv_args("in.webm", "out.mp4", probe)
+        self.assertEqual(args[args.index("-c:v") + 1], "libx264")
+        self.assertEqual(args[args.index("-pix_fmt") + 1], "yuv420p")
+        self.assertEqual(args[args.index("-c:a") + 1], "aac")
+        self.assertIn("+faststart", args)
+
+    def test_plan_transcodes_10bit_h264(self):
+        plan = tv_codec_plan(
+            {
+                "streams": [
+                    {"codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p10le"},
+                    {"codec_type": "audio", "codec_name": "aac"},
+                ]
+            }
+        )
+        self.assertFalse(plan["copy_video"])
+        self.assertTrue(plan["copy_audio"])
+
+
+class TvCompatibleEncodeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_transcodes_mpeg4_mp2_to_h264_aac(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = os.path.join(tmp, "bad.mp4")
+            make = await asyncio_run_ffmpeg(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc=size=160x120:rate=5:duration=1",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=1000:duration=1",
+                    "-c:v",
+                    "mpeg4",
+                    "-c:a",
+                    "mp2",
+                    src,
+                ]
+            )
+            self.assertEqual(make, 0)
+            from app.ytdlp import ensure_tv_compatible, probe_media
+
+            out = await ensure_tv_compatible(src)
+            self.assertTrue(os.path.isfile(out))
+            probe = await probe_media(out)
+            streams = {s["codec_type"]: s["codec_name"] for s in probe["streams"]}
+            self.assertEqual(streams["video"], "h264")
+            self.assertEqual(streams["audio"], "aac")
+            pix = next(s["pix_fmt"] for s in probe["streams"] if s["codec_type"] == "video")
+            self.assertEqual(pix, "yuv420p")
+
+
+async def asyncio_run_ffmpeg(args: list[str]) -> int:
+    proc = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    return await proc.wait()
 
 
 if __name__ == "__main__":
