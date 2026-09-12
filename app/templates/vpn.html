@@ -28,6 +28,7 @@
       <thead>
         <tr>
           <th>IP</th>
+          <th></th>
           <th>HOSTNAME</th>
           <th>SOURCE</th>
           <th>PROTOCOL</th>
@@ -40,25 +41,12 @@
           <th>FAILURES</th>
           <th>STATUS</th>
           <th>SCORE</th>
-          <th></th>
         </tr>
       </thead>
       <tbody>
       {% for e in endpoints %}
         <tr>
           <td>{{ e.ip_address }}</td>
-          <td>{{ e.hostname or "—" }}</td>
-          <td>{{ e.display_source() }}</td>
-          <td>{{ e.display_protocol() }}</td>
-          <td>{{ e.reported_speed_bps|speed }}</td>
-          <td>{{ e.reported_ping_ms if e.reported_ping_ms is not none else "—" }}</td>
-          <td>{{ e.reported_sessions if e.reported_sessions is not none else "—" }}</td>
-          <td>{{ e.last_seen_at|ago }}</td>
-          <td>{{ e.last_checked_at|ago }}</td>
-          <td>{{ e.last_success_at|ago }}</td>
-          <td>{{ e.failed_connections }}</td>
-          <td>{{ e.display_status() }}</td>
-          <td>{{ e.score }}</td>
           <td>
             <div class="actions">
               <form method="post" action="/vpn/endpoints/{{ e.id }}/test">
@@ -75,6 +63,18 @@
               {% endif %}
             </div>
           </td>
+          <td>{{ e.hostname or "—" }}</td>
+          <td>{{ e.display_source() }}</td>
+          <td>{{ e.display_protocol() }}</td>
+          <td>{{ e.reported_speed_bps|speed }}</td>
+          <td>{{ e.reported_ping_ms if e.reported_ping_ms is not none else "—" }}</td>
+          <td>{{ e.reported_sessions if e.reported_sessions is not none else "—" }}</td>
+          <td>{{ e.last_seen_at|ago }}</td>
+          <td>{{ e.last_checked_at|ago }}</td>
+          <td>{{ e.last_success_at|ago }}</td>
+          <td>{{ e.failed_connections }}</td>
+          <td>{{ e.display_status() }}</td>
+          <td>{{ e.score }}</td>
         </tr>
       {% else %}
         <tr>
