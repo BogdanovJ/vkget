@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import ipaddress
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 
 
 IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
-SOURCE_ORDER = ("vpngate", "vpnobratno", "manual")
 
 
 def now() -> datetime:
@@ -43,30 +42,6 @@ def first_public_ipv4(text: str | None) -> str | None:
     return None
 
 
-def merge_sources(*values: str | None) -> str:
-    seen: list[str] = []
-    for value in values:
-        for part in (value or "").split(","):
-            name = part.strip().lower()
-            if name and name not in seen:
-                seen.append(name)
-    if not seen:
-        return "vpngate"
-    return ",".join(sorted(seen, key=lambda item: (
-        SOURCE_ORDER.index(item) if item in SOURCE_ORDER else 99,
-        item,
-    )))
-
-
-def preferred_source(sources: str) -> str:
-    parts = [part.strip() for part in (sources or "").split(",") if part.strip()]
-    if "vpnobratno" in parts and "vpngate" in parts:
-        return "vpngate"
-    if parts:
-        return parts[0]
-    return "vpngate"
-
-
 def parse_int(value, default: int | None = None) -> int | None:
     if value is None or value == "":
         return default
@@ -95,19 +70,6 @@ def parse_rate_bps(value: str | None) -> int | None:
     return int(number * multiplier)
 
 
-def format_speed(bps: int | None) -> str:
-    if not bps:
-        return "—"
-    if bps >= 1_000_000:
-        mbps = bps / 1_000_000
-        if mbps >= 10:
-            return f"{mbps:.0f} Mbps"
-        return f"{mbps:.1f} Mbps"
-    if bps >= 1000:
-        return f"{bps / 1000:.0f} kbps"
-    return f"{bps} bps"
-
-
 def format_ago(value: datetime | None, current: datetime | None = None) -> str:
     if value is None:
         return "NEVER"
@@ -122,13 +84,3 @@ def format_ago(value: datetime | None, current: datetime | None = None) -> str:
     if secs < 86400:
         return f"{secs // 3600}h ago"
     return f"{secs // 86400}d ago"
-
-
-def cooldown_for_failures(failures: int) -> timedelta:
-    if failures <= 1:
-        return timedelta(minutes=10)
-    if failures == 2:
-        return timedelta(minutes=30)
-    if failures < 5:
-        return timedelta(hours=2)
-    return timedelta(hours=12)

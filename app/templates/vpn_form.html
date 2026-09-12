@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} · VKGET{% endblock %}
+{% block content %}
+<section class="hero">
+  <div>
+    <div class="eyebrow">MANUAL PROFILE</div>
+    <h1>{{ title }}</h1>
+  </div>
+  <a class="buttonlike" href="/vpn">BACK</a>
+</section>
+
+<section class="panel">
+  {% if error %}
+  <div class="notice bad">{{ error }}</div>
+  {% endif %}
+  <form method="post" action="{{ action }}" enctype="multipart/form-data">
+    <label>PROFILE NAME</label>
+    <input name="name" required value="{{ name }}" placeholder="Russian VPS">
+
+    <label>VPN TYPE</label>
+    <div class="choice-row">
+      <label class="check">
+        <input type="radio" name="vpn_type" value="wireguard" {{ "checked" if vpn_type == "wireguard" else "" }}>
+        WIREGUARD
+      </label>
+      <label class="check">
+        <input type="radio" name="vpn_type" value="openvpn" {{ "checked" if vpn_type != "wireguard" else "" }}>
+        OPENVPN
+      </label>
+    </div>
+
+    <label>UPLOAD CONFIG · .ovpn / .conf</label>
+    <input id="vpn-file" type="file" name="upload" accept=".ovpn,.conf,text/plain">
+
+    <label>CONFIGURATION</label>
+    <textarea id="vpn-config" name="config" rows="16" placeholder="Paste the OpenVPN or WireGuard config, or choose a file first.">{{ config }}</textarea>
+
+    <label class="check">
+      <input type="checkbox" name="enabled" value="on" {{ "checked" if enabled else "" }}>
+      ENABLED
+    </label>
+    <label class="check">
+      <input type="checkbox" name="is_default" value="on" {{ "checked" if is_default else "" }}>
+      USE THIS PROFILE
+    </label>
+    <label class="check">
+      <input type="checkbox" name="fallback_to_direct" value="on" {{ "checked" if fallback_to_direct else "" }}>
+      FALLBACK TO DIRECT DOWNLOAD IF VPN FAILS
+    </label>
+
+    <button type="submit">SAVE</button>
+  </form>
+</section>
+<script>
+(function () {
+  var input = document.getElementById("vpn-file");
+  var editor = document.getElementById("vpn-config");
+  if (!input || !editor) return;
+  input.addEventListener("change", function () {
+    var file = input.files && input.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function () {
+      editor.value = reader.result || "";
+    };
+    reader.readAsText(file);
+  });
+})();
+</script>
+{% endblock %}

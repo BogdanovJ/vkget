@@ -4,7 +4,7 @@ import asyncio
 from datetime import datetime
 from urllib import request
 
-from fastapi import Depends, FastAPI, Form, HTTPException, Request
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .db import ensure_schema, get_db
-from .models import AppState, Subscription, Video, VpnEndpoint
+from .models import AppState, Subscription, Video, VpnProfile
 from .scheduler import (
     recover_interrupted_downloads,
     scan_subscription,
@@ -21,11 +21,23 @@ from .scheduler import (
     get_global_cooldown,
     now
 )
-from .vpn.discovery import maybe_refresh_vpn_catalogue
-from .vpn.manager import manager, mark_success
-from .vpn.manual import ManualEndpointError, upsert_manual_endpoint
-from .vpn.status import serialize_endpoint, vpn_dashboard_status
-from .vpn.util import format_ago, format_speed
+from .vpn.manager import manager
+from .vpn.profiles import (
+    ProfileError,
+    create_profile,
+    delete_profile,
+    serialize_profile,
+    update_profile,
+)
+from .vpn.settings import (
+    pop_flash,
+    set_fallback_to_direct,
+    set_flash,
+    set_selected_profile,
+    set_vpn_enabled,
+)
+from .vpn.status import list_profiles, vpn_dashboard_status
+from .vpn.util import format_ago
 from .ytdlp import (
     inspect_url,
     is_usable_channel,
@@ -60,7 +72,6 @@ templates.env.filters["stamp"] = format_stamp
 templates.env.filters["when"] = format_when
 templates.env.filters["vkvideo"] = to_vkvideo
 templates.env.filters["ago"] = format_ago
-templates.env.filters["speed"] = format_speed
 
 @app.on_event("startup")
 async def startup():
@@ -420,75 +431,234 @@ def queue(request: Request, db: Session = Depends(get_db)):
         context={"videos": videos},
     )
 
+def _form_bool(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+async def _config_from_form(config: str, upload: UploadFile | None) -> str:
+    if upload and upload.filename:
+        raw = await upload.read()
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return raw.decode("latin-1")
+    return config
+
+
 @app.get("/vpn", response_class=HTMLResponse)
 def vpn_page(request: Request, db: Session = Depends(get_db)):
-    endpoints = db.scalars(
-        select(VpnEndpoint).order_by(VpnEndpoint.score.desc(), VpnEndpoint.ip_address.asc())
-    ).all()
+    flash = pop_flash(db)
     return templates.TemplateResponse(
         request=request,
         name="vpn.html",
         context={
             "vpn": vpn_dashboard_status(db),
-            "endpoints": endpoints,
+            "profiles": list_profiles(db),
+            "flash": flash,
         },
     )
 
 
-@app.post("/vpn/refresh")
-async def vpn_refresh_form():
-    await maybe_refresh_vpn_catalogue(force=True)
+@app.post("/vpn/enable")
+def vpn_enable_form(db: Session = Depends(get_db)):
+    set_vpn_enabled(db, True)
     return RedirectResponse("/vpn", status_code=303)
 
 
-@app.post("/vpn/manual")
-def vpn_add_manual(
-    config: str = Form(...),
-    ip_address: str = Form(""),
-    hostname: str = Form(""),
-    priority: str = Form("50"),
+@app.post("/vpn/disable")
+async def vpn_disable_form(db: Session = Depends(get_db)):
+    await manager.disconnect()
+    set_vpn_enabled(db, False)
+    return RedirectResponse("/vpn", status_code=303)
+
+
+@app.post("/vpn/fallback")
+def vpn_fallback_form(
+    enabled: str = Form("off"),
     db: Session = Depends(get_db),
 ):
+    set_fallback_to_direct(db, _form_bool(enabled))
+    return RedirectResponse("/vpn", status_code=303)
+
+
+@app.post("/vpn/disconnect")
+async def vpn_disconnect_form():
+    await manager.disconnect()
+    return RedirectResponse("/vpn", status_code=303)
+
+
+@app.get("/vpn/new", response_class=HTMLResponse)
+def vpn_new_page(request: Request):
+    return templates.TemplateResponse(
+        request=request,
+        name="vpn_form.html",
+        context={
+            "title": "ADD VPN PROFILE",
+            "action": "/vpn/profiles",
+            "profile": None,
+            "error": "",
+            "name": "",
+            "vpn_type": "wireguard",
+            "config": "",
+            "enabled": True,
+            "is_default": False,
+            "fallback_to_direct": True,
+        },
+    )
+
+
+@app.post("/vpn/profiles")
+async def vpn_create_profile(
+    request: Request,
+    name: str = Form(""),
+    vpn_type: str = Form("openvpn"),
+    config: str = Form(""),
+    enabled: str = Form("off"),
+    is_default: str = Form("off"),
+    fallback_to_direct: str = Form("off"),
+    upload: UploadFile | None = File(None),
+    db: Session = Depends(get_db),
+):
+    config_text = await _config_from_form(config, upload)
     try:
-        parsed_priority = int(priority) if str(priority).strip() else None
-    except ValueError:
-        parsed_priority = None
-    try:
-        upsert_manual_endpoint(
+        create_profile(
             db,
-            config_text=config,
-            ip_address=ip_address,
-            hostname=hostname,
-            priority=parsed_priority,
+            name=name,
+            vpn_type=vpn_type,
+            config_text=config_text,
+            enabled=_form_bool(enabled),
+            is_default=_form_bool(is_default),
+            fallback_to_direct=_form_bool(fallback_to_direct),
         )
-    except ManualEndpointError as exc:
-        raise HTTPException(400, str(exc))
+    except ProfileError as exc:
+        return templates.TemplateResponse(
+            request=request,
+            name="vpn_form.html",
+            status_code=400,
+            context={
+                "title": "ADD VPN PROFILE",
+                "action": "/vpn/profiles",
+                "profile": None,
+                "error": str(exc),
+                "name": name,
+                "vpn_type": vpn_type,
+                "config": config_text,
+                "enabled": True,
+                "is_default": _form_bool(is_default),
+                "fallback_to_direct": _form_bool(fallback_to_direct),
+            },
+        )
     return RedirectResponse("/vpn", status_code=303)
 
 
-@app.post("/vpn/endpoints/{endpoint_id}/enable")
-def vpn_enable_endpoint(endpoint_id: int, db: Session = Depends(get_db)):
-    row = db.get(VpnEndpoint, endpoint_id)
+@app.get("/vpn/profiles/{profile_id}/edit", response_class=HTMLResponse)
+def vpn_edit_page(profile_id: int, request: Request, db: Session = Depends(get_db)):
+    row = db.get(VpnProfile, profile_id)
     if not row:
         raise HTTPException(404)
-    row.is_active = True
-    db.commit()
-    return RedirectResponse("/vpn", status_code=303)
+    return templates.TemplateResponse(
+        request=request,
+        name="vpn_form.html",
+        context={
+            "title": "EDIT VPN PROFILE",
+            "action": f"/vpn/profiles/{row.id}",
+            "profile": row,
+            "error": "",
+            "name": row.name,
+            "vpn_type": row.vpn_type,
+            "config": row.config_text,
+            "enabled": row.enabled,
+            "is_default": row.is_default,
+            "fallback_to_direct": row.fallback_to_direct,
+        },
+    )
 
 
-@app.post("/vpn/endpoints/{endpoint_id}/disable")
-def vpn_disable_endpoint(endpoint_id: int, db: Session = Depends(get_db)):
-    row = db.get(VpnEndpoint, endpoint_id)
+@app.post("/vpn/profiles/{profile_id}")
+async def vpn_update_profile(
+    profile_id: int,
+    request: Request,
+    name: str = Form(""),
+    vpn_type: str = Form("openvpn"),
+    config: str = Form(""),
+    enabled: str = Form("off"),
+    is_default: str = Form("off"),
+    fallback_to_direct: str = Form("off"),
+    upload: UploadFile | None = File(None),
+    db: Session = Depends(get_db),
+):
+    row = db.get(VpnProfile, profile_id)
     if not row:
         raise HTTPException(404)
-    row.is_active = False
-    db.commit()
+    config_text = await _config_from_form(config, upload)
+    try:
+        update_profile(
+            db,
+            row,
+            name=name,
+            vpn_type=vpn_type,
+            config_text=config_text,
+            enabled=_form_bool(enabled),
+            is_default=_form_bool(is_default),
+            fallback_to_direct=_form_bool(fallback_to_direct),
+        )
+    except ProfileError as exc:
+        return templates.TemplateResponse(
+            request=request,
+            name="vpn_form.html",
+            status_code=400,
+            context={
+                "title": "EDIT VPN PROFILE",
+                "action": f"/vpn/profiles/{row.id}",
+                "profile": row,
+                "error": str(exc),
+                "name": name,
+                "vpn_type": vpn_type,
+                "config": config_text,
+                "enabled": _form_bool(enabled),
+                "is_default": _form_bool(is_default),
+                "fallback_to_direct": _form_bool(fallback_to_direct),
+            },
+        )
     return RedirectResponse("/vpn", status_code=303)
 
 
-@app.post("/vpn/endpoints/{endpoint_id}/test")
-async def vpn_test_endpoint_form(endpoint_id: int, db: Session = Depends(get_db)):
-    await _test_endpoint(endpoint_id, db)
+@app.post("/vpn/profiles/{profile_id}/use")
+def vpn_use_profile(profile_id: int, db: Session = Depends(get_db)):
+    row = db.get(VpnProfile, profile_id)
+    if not row:
+        raise HTTPException(404)
+    if not row.enabled:
+        set_flash(db, "Enable the profile before selecting it.")
+        return RedirectResponse("/vpn", status_code=303)
+    set_selected_profile(db, row.id)
+    return RedirectResponse("/vpn", status_code=303)
+
+
+@app.post("/vpn/profiles/{profile_id}/delete")
+async def vpn_delete_profile(profile_id: int, db: Session = Depends(get_db)):
+    row = db.get(VpnProfile, profile_id)
+    if not row:
+        raise HTTPException(404)
+    if row.is_default:
+        await manager.disconnect()
+    delete_profile(db, row)
+    return RedirectResponse("/vpn", status_code=303)
+
+
+@app.post("/vpn/profiles/{profile_id}/test")
+async def vpn_test_profile_form(profile_id: int, db: Session = Depends(get_db)):
+    result = await _test_profile(profile_id, db)
+    if result.get("ok"):
+        set_flash(
+            db,
+            "Connection successful\n"
+            f"External IP: {result.get('ip') or '—'}\n"
+            f"Country: {result.get('country') or '—'}\n"
+            f"Latency: {result.get('latency_ms') or '—'} ms",
+        )
+    else:
+        set_flash(db, f"Connection failed\n{result.get('detail') or 'test failed'}")
     return RedirectResponse("/vpn", status_code=303)
 
 
@@ -497,75 +667,122 @@ def api_vpn_status(db: Session = Depends(get_db)):
     return vpn_dashboard_status(db)
 
 
-@app.get("/api/vpn/endpoints")
-def api_vpn_endpoints(db: Session = Depends(get_db)):
-    current = now()
-    rows = db.scalars(
-        select(VpnEndpoint).order_by(VpnEndpoint.score.desc(), VpnEndpoint.ip_address.asc())
-    ).all()
-    return {
-        "endpoints": [serialize_endpoint(row, current) for row in rows],
-    }
+@app.get("/api/vpn/profiles")
+def api_vpn_profiles(db: Session = Depends(get_db)):
+    return {"profiles": [serialize_profile(row) for row in list_profiles(db)]}
 
 
-@app.post("/api/vpn/refresh")
-async def api_vpn_refresh():
-    stats = await maybe_refresh_vpn_catalogue(force=True)
-    return {
-        "ok": True,
-        "found": getattr(stats, "found", 0),
-        "added": getattr(stats, "added", 0),
-        "updated": getattr(stats, "updated", 0),
-        "gate_current": getattr(stats, "gate_current", 0),
-        "obratno_current": getattr(stats, "obratno_current", 0),
-        "unique_current": getattr(stats, "unique_current", 0),
-        "historical_eligible": getattr(stats, "historical_eligible", 0),
-        "candidate_pool": getattr(stats, "candidate_pool", 0),
-        "inactive": getattr(stats, "inactive", 0),
-    }
-
-
-@app.post("/api/vpn/manual")
-async def api_vpn_manual(request: Request, db: Session = Depends(get_db)):
+@app.post("/api/vpn/profiles")
+async def api_vpn_create(request: Request, db: Session = Depends(get_db)):
+    payload = await request.json()
     try:
-        payload = await request.json()
-    except Exception:
-        raise HTTPException(400, "invalid JSON")
-    if not isinstance(payload, dict):
-        raise HTTPException(400, "invalid payload")
-    try:
-        row = upsert_manual_endpoint(
+        row = create_profile(
             db,
+            name=str(payload.get("name") or ""),
+            vpn_type=str(payload.get("vpn_type") or payload.get("type") or ""),
             config_text=str(payload.get("config") or ""),
-            ip_address=str(payload.get("ip_address") or ""),
-            hostname=str(payload.get("hostname") or ""),
-            priority=payload.get("priority"),
+            enabled=bool(payload.get("enabled", True)),
+            is_default=bool(payload.get("is_default", False)),
+            fallback_to_direct=bool(payload.get("fallback_to_direct", True)),
         )
-    except ManualEndpointError as exc:
+    except ProfileError as exc:
         raise HTTPException(400, str(exc))
-    return {"ok": True, "id": row.id, "ip_address": row.ip_address}
+    return {"ok": True, "id": row.id}
 
 
-@app.post("/api/vpn/test/{endpoint_id}")
-async def api_vpn_test(endpoint_id: int, db: Session = Depends(get_db)):
-    result = await _test_endpoint(endpoint_id, db)
-    return result
-
-
-async def _test_endpoint(endpoint_id: int, db: Session):
-    row = db.get(VpnEndpoint, endpoint_id)
+@app.get("/api/vpn/profiles/{profile_id}")
+def api_vpn_get_profile(profile_id: int, db: Session = Depends(get_db)):
+    row = db.get(VpnProfile, profile_id)
     if not row:
         raise HTTPException(404)
-    geo = await manager.connect_and_verify(row)
+    return serialize_profile(row, include_config=True)
+
+
+@app.post("/api/vpn/profiles/{profile_id}")
+async def api_vpn_update(profile_id: int, request: Request, db: Session = Depends(get_db)):
+    row = db.get(VpnProfile, profile_id)
+    if not row:
+        raise HTTPException(404)
+    payload = await request.json()
+    try:
+        update_profile(
+            db,
+            row,
+            name=payload.get("name"),
+            vpn_type=payload.get("vpn_type") or payload.get("type"),
+            config_text=payload.get("config"),
+            enabled=payload.get("enabled"),
+            is_default=payload.get("is_default"),
+            fallback_to_direct=payload.get("fallback_to_direct"),
+        )
+    except ProfileError as exc:
+        raise HTTPException(400, str(exc))
+    return {"ok": True, "id": row.id}
+
+
+@app.post("/api/vpn/profiles/{profile_id}/delete")
+async def api_vpn_delete(profile_id: int, db: Session = Depends(get_db)):
+    row = db.get(VpnProfile, profile_id)
+    if not row:
+        raise HTTPException(404)
+    if row.is_default:
+        await manager.disconnect()
+    delete_profile(db, row)
+    return {"ok": True}
+
+
+@app.post("/api/vpn/profiles/{profile_id}/test")
+async def api_vpn_test(profile_id: int, db: Session = Depends(get_db)):
+    return await _test_profile(profile_id, db)
+
+
+@app.post("/api/vpn/profiles/{profile_id}/connect")
+async def api_vpn_connect(profile_id: int, db: Session = Depends(get_db)):
+    row = db.get(VpnProfile, profile_id)
+    if not row:
+        raise HTTPException(404)
+    if not row.enabled:
+        raise HTTPException(400, "profile is disabled")
+    set_selected_profile(db, row.id)
+    result = await manager.connect(row)
+    if not result.ok:
+        raise HTTPException(502, result.detail)
+    return {"ok": True}
+
+
+@app.post("/api/vpn/disconnect")
+async def api_vpn_disconnect():
     await manager.disconnect()
-    if geo:
-        mark_success(endpoint_id, geo)
-        return {"ok": True, "ip": geo.ip, "country": geo.country}
-    row = db.get(VpnEndpoint, endpoint_id)
-    return {
-        "ok": False,
-        "detail": row.failure_reason if row else "test failed",
-    }
+    return {"ok": True, "connected": False}
+
+
+@app.post("/api/vpn/enable")
+def api_vpn_enable(db: Session = Depends(get_db)):
+    set_vpn_enabled(db, True)
+    return {"ok": True, "enabled": True}
+
+
+@app.post("/api/vpn/disable")
+async def api_vpn_disable(db: Session = Depends(get_db)):
+    await manager.disconnect()
+    set_vpn_enabled(db, False)
+    return {"ok": True, "enabled": False}
+
+
+async def _test_profile(profile_id: int, db: Session):
+    row = db.get(VpnProfile, profile_id)
+    if not row:
+        raise HTTPException(404)
+    result = await manager.connect_and_probe(row)
+    await manager.disconnect()
+    if result.ok and result.geo:
+        return {
+            "ok": True,
+            "ip": result.geo.ip,
+            "country": result.geo.country,
+            "latency_ms": result.latency_ms,
+        }
+    return {"ok": False, "detail": result.detail or "test failed"}
 
 
 @app.get("/healthz")

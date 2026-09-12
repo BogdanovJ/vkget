@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import base64
-import binascii
 import re
 from dataclasses import dataclass
 
@@ -156,25 +154,6 @@ class OvpnError(ValueError):
     pass
 
 
-def decode_vpngate_config(encoded: str | None) -> str:
-    raw = (encoded or "").strip()
-    if not raw:
-        raise OvpnError("empty OpenVPN configuration")
-    try:
-        decoded = base64.b64decode(raw, validate=False)
-    except (binascii.Error, ValueError) as exc:
-        raise OvpnError(f"invalid base64 OpenVPN configuration: {exc}") from exc
-    if not decoded:
-        raise OvpnError("empty decoded OpenVPN configuration")
-    try:
-        text = decoded.decode("utf-8")
-    except UnicodeDecodeError:
-        text = decoded.decode("latin-1")
-    if "\x00" in text:
-        raise OvpnError("OpenVPN configuration contains NUL bytes")
-    return text.replace("\r\n", "\n").replace("\r", "\n")
-
-
 def _normalize_proto(value: str | None) -> str | None:
     if not value:
         return None
@@ -310,7 +289,3 @@ def sanitize_ovpn(config_text: str, *, require_ca: bool = True) -> SanitizedOvpn
         remote_port=port,
         uses_ip_remote=uses_ip,
     )
-
-
-def decode_and_sanitize(encoded: str | None) -> SanitizedOvpn:
-    return sanitize_ovpn(decode_vpngate_config(encoded))

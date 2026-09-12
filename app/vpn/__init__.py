@@ -1,8 +1,7 @@
-from .fallback import vpn_eligible_failure, vpn_mode
-from .scoring import compute_score
+from .runtime import download_with_vpn
+from .settings import is_vpn_enabled
 
 __all__ = [
-    "compute_score",
-    "vpn_eligible_failure",
-    "vpn_mode",
+    "download_with_vpn",
+    "is_vpn_enabled",
 ]

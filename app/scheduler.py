@@ -12,8 +12,7 @@ from .db import SessionLocal
 from .filters import rejection_reason
 from .models import AppState, Subscription, Video
 from .notifier import format_video_notice, notify
-from .vpn.discovery import maybe_refresh_vpn_catalogue
-from .vpn.runtime import download_with_vpn_fallback
+from .vpn.runtime import download_with_vpn
 from .ytdlp import (
     PLACEHOLDER_TITLES,
     download_folder_name,
@@ -502,7 +501,7 @@ async def run_one_download() -> bool:
     )
 
     try:
-        rc, final_path, log = await download_with_vpn_fallback(
+        rc, final_path, log = await download_with_vpn(
             download_video,
             url,
             channel,
@@ -642,8 +641,6 @@ async def scheduler_loop():
         reencoded = False
         try:
             current = now()
-            await maybe_refresh_vpn_catalogue()
-
             with SessionLocal() as db:
                 due_ids = [
                     sub.id

@@ -1,59 +1,16 @@
 from __future__ import annotations
 
-from datetime import datetime
-
 import httpx
-from sqlalchemy import func, select
+from sqlalchemy import select
 
-from ..config import settings
-from ..models import AppState, Video, VpnEndpoint
-from .discovery import DISCOVERY_STATE_KEY
-from .fallback import vpn_mode
-from .manager import endpoint_is_candidate, get_best_endpoint
-from .scoring import is_known_good
-from .util import format_ago, format_speed, now
-
-
-def compute_pool_stats(db, current: datetime | None = None) -> dict:
-    when = current or now()
-    rows = list(db.scalars(select(VpnEndpoint)).all())
-    current_live = 0
-    historical_eligible = 0
-    candidate_pool = 0
-    known_good = 0
-    cooldown = 0
-    inactive = 0
-    for row in rows:
-        status = row.display_status(when)
-        if status == "Inactive":
-            inactive += 1
-        if status == "Cooldown":
-            cooldown += 1
-        if is_known_good(row, when) and row.is_active:
-            known_good += 1
-        if row.is_active and not row.is_stale:
-            current_live += 1
-        elif (
-            row.is_active
-            and row.is_stale
-            and row.has_usable_config()
-            and not (row.cooldown_until and row.cooldown_until > when)
-        ):
-            historical_eligible += 1
-        if endpoint_is_candidate(row, when):
-            candidate_pool += 1
-    return {
-        "current_live": current_live,
-        "historical_eligible": historical_eligible,
-        "candidate_pool": candidate_pool,
-        "known_good": known_good,
-        "cooldown": cooldown,
-        "inactive": inactive,
-    }
+from ..models import VpnProfile
+from .profiles import serialize_profile
+from .settings import fallback_to_direct, gateway_base_url, is_vpn_enabled, selected_profile
+from .util import format_ago, now
 
 
 def gateway_status_sync() -> dict:
-    base = str(getattr(settings, "vpn_gateway_url", "") or "").rstrip("/")
+    base = gateway_base_url()
     if not base:
         return {"connected": False, "available": False, "detail": "unconfigured"}
     try:
@@ -67,100 +24,30 @@ def gateway_status_sync() -> dict:
         return {"connected": False, "available": False, "detail": str(exc)}
 
 
-def last_discovery_at(db) -> datetime | None:
-    row = db.get(AppState, DISCOVERY_STATE_KEY)
-    if not row or not row.value:
-        return None
-    try:
-        return datetime.fromisoformat(row.value)
-    except ValueError:
-        return None
-
-
-def vpn_dashboard_status(db, current: datetime | None = None) -> dict:
+def vpn_dashboard_status(db, current=None) -> dict:
     when = current or now()
-    mode = vpn_mode()
+    enabled = is_vpn_enabled(db)
+    profile = selected_profile(db)
     gateway = gateway_status_sync()
-    pool = compute_pool_stats(db, when)
-    available = pool["current_live"]
-    connected_ip = gateway.get("endpoint_ip")
-    current_row = None
-    if connected_ip:
-        current_row = db.scalar(
-            select(VpnEndpoint).where(VpnEndpoint.ip_address == connected_ip)
-        )
-    if current_row is None:
-        current_row = get_best_endpoint(db, current=when)
-
-    if mode == "off":
-        status = "Disabled"
-    elif gateway.get("connected"):
-        status = "Connected"
-    else:
-        status = "Disconnected"
-
+    fallback = fallback_to_direct(db, profile)
     return {
-        "mode": mode,
-        "status": status,
-        "connected": bool(gateway.get("connected")),
+        "enabled": enabled,
+        "fallback_to_direct": fallback,
+        "status": "ON" if enabled else "OFF",
+        "profile": serialize_profile(profile) if profile else None,
+        "profile_name": profile.name if profile else None,
+        "profile_type": profile.display_type() if profile else None,
         "gateway_available": bool(gateway.get("available")),
-        "endpoint_ip": getattr(current_row, "ip_address", None) if current_row else None,
-        "source": current_row.display_source() if current_row else "—",
-        "reported_speed": format_speed(
-            getattr(current_row, "reported_speed_bps", None) if current_row else None
-        ),
-        "measured_latency": (
-            f"{current_row.measured_latency_ms} ms"
-            if current_row and current_row.measured_latency_ms is not None
-            else (
-                f"{current_row.reported_ping_ms} ms"
-                if current_row and current_row.reported_ping_ms is not None
-                else "—"
-            )
-        ),
-        "last_discovery": format_ago(last_discovery_at(db), when),
-        "available_count": available,
-        "pool": pool,
-        "download_in_progress": bool(
-            db.scalar(
-                select(func.count()).select_from(Video).where(Video.status == "DOWNLOADING")
-            )
-        ),
+        "gateway_detail": gateway.get("detail") or "",
+        "connected": bool(gateway.get("connected")),
+        "exit_ip": gateway.get("endpoint_ip") or (profile.last_exit_ip if profile else None),
+        "exit_country": profile.last_exit_country if profile else None,
+        "last_connected": format_ago(profile.last_connected_at, when) if profile else "NEVER",
+        "last_error": profile.last_error if profile else None,
     }
 
 
-def serialize_endpoint(row: VpnEndpoint, current: datetime | None = None) -> dict:
-    when = current or now()
-    return {
-        "id": row.id,
-        "ip_address": row.ip_address,
-        "hostname": row.hostname,
-        "source": row.source,
-        "sources": row.sources,
-        "display_source": row.display_source(),
-        "protocol": row.display_protocol(),
-        "reported_speed_bps": row.reported_speed_bps,
-        "reported_speed": format_speed(row.reported_speed_bps),
-        "reported_ping_ms": row.reported_ping_ms,
-        "reported_sessions": row.reported_sessions,
-        "last_seen_at": row.last_seen_at.isoformat() if row.last_seen_at else None,
-        "last_seen": format_ago(row.last_seen_at, when),
-        "last_checked_at": row.last_checked_at.isoformat() if row.last_checked_at else None,
-        "last_tested": format_ago(row.last_checked_at, when),
-        "last_success_at": row.last_success_at.isoformat() if row.last_success_at else None,
-        "last_success": format_ago(row.last_success_at, when),
-        "failed_connections": row.failed_connections,
-        "consecutive_failures": row.consecutive_failures,
-        "status": row.display_status(when),
-        "score": row.score,
-        "is_active": row.is_active,
-        "is_available": row.is_available,
-        "is_stale": row.is_stale,
-        "failure_reason": row.failure_reason,
-        "variants": row.display_protocol(),
-        "last_good_variant": row.last_good_variant,
-        "last_failed_variant": row.last_failed_variant,
-        "cooldown_until": row.cooldown_until.isoformat() if row.cooldown_until else None,
-        "cooldown": row.display_cooldown(when),
-        "priority": row.priority,
-    }
+def list_profiles(db) -> list[VpnProfile]:
+    return list(
+        db.scalars(select(VpnProfile).order_by(VpnProfile.name.asc(), VpnProfile.id.asc())).all()
+    )
