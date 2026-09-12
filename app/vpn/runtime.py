@@ -1,55 +1,51 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-
-from ..config import settings
-from .fallback import vpn_eligible_failure, vpn_mode
-from .manager import get_best_endpoint, manager, mark_failure, mark_success, proxy_url
-
-
-@dataclass
-class VpnDownloadResult:
-    attempted: bool = False
-    succeeded: bool = False
-    rc: int = 1
-    path: str | None = None
-    log: str = ""
-    endpoint_ids: list[int] = field(default_factory=list)
+from ..db import SessionLocal
+from ..models import VpnProfile
+from .manager import manager
+from .profiles import mark_profile_failure, mark_profile_success
+from .settings import fallback_to_direct, is_vpn_enabled, proxy_url, selected_profile
 
 
-def _max_attempts() -> int:
-    value = getattr(settings, "vpn_max_endpoint_attempts", 6)
-    try:
-        return max(int(value), 1)
-    except (TypeError, ValueError):
-        return 6
+async def download_with_vpn(download_fn, url: str, *args, **kwargs):
+    if not is_vpn_enabled():
+        print("vkget: VPN disabled, using direct download", flush=True)
+        return await download_fn(url, *args, **kwargs)
 
+    with SessionLocal() as db:
+        profile = selected_profile(db)
+        allow_fallback = fallback_to_direct(db, profile)
+        profile_id = profile.id if profile else None
 
-async def try_vpn_download(download_fn, url: str, *args, **kwargs) -> VpnDownloadResult:
-    result = VpnDownloadResult()
-    tried: set[int] = set()
-    logs: list[str] = []
+    if not profile_id:
+        print("vkget: VPN is enabled, but no VPN profile is selected", flush=True)
+        if allow_fallback:
+            print("vkget: VPN fallback enabled, retrying direct", flush=True)
+            return await download_fn(url, *args, **kwargs)
+        print("vkget: direct fallback disabled", flush=True)
+        return 1, None, "VPN enabled but no profile is selected"
 
-    for attempt in range(_max_attempts()):
-        endpoint = get_best_endpoint(exclude_ids=tried)
-        if not endpoint:
-            if attempt == 0:
-                print("vkget: VPN fallback unavailable: no Russian endpoints", flush=True)
-            break
-        tried.add(endpoint.id)
-        result.attempted = True
-        result.endpoint_ids.append(endpoint.id)
-        print(
-            f"vkget: VPN candidate selected: {endpoint.ip_address} score={endpoint.score}",
-            flush=True,
-        )
-        geo = await manager.connect_and_verify(endpoint)
-        if not geo:
-            logs.append(f"{endpoint.ip_address}: connect/verify failed")
-            if attempt + 1 < _max_attempts():
-                print("vkget: VPN rotating endpoint", flush=True)
-            continue
+    with SessionLocal() as db:
+        profile = db.get(VpnProfile, profile_id)
+        if not profile or not profile.enabled:
+            print("vkget: VPN is enabled, but no VPN profile is selected", flush=True)
+            if allow_fallback:
+                print("vkget: VPN fallback enabled, retrying direct", flush=True)
+                return await download_fn(url, *args, **kwargs)
+            print("vkget: direct fallback disabled", flush=True)
+            return 1, None, "VPN enabled but no profile is selected"
 
+        result = await manager.connect(profile)
+        if not result.ok:
+            print(f"vkget: VPN connection failed: {result.detail}", flush=True)
+            mark_profile_failure(db, profile.id, result.detail)
+            if allow_fallback:
+                print("vkget: VPN fallback enabled, retrying direct", flush=True)
+                return await download_fn(url, *args, **kwargs)
+            print("vkget: direct fallback disabled", flush=True)
+            return 1, None, result.detail
+
+        print("vkget: yt-dlp using VPN proxy", flush=True)
         try:
             rc, path, log = await download_fn(
                 url,
@@ -58,70 +54,38 @@ async def try_vpn_download(download_fn, url: str, *args, **kwargs) -> VpnDownloa
                 **kwargs,
             )
         except TypeError:
-            # Test doubles and older callers may not accept proxy=.
             await manager.disconnect()
-            rc, path, log = 1, None, "download function does not support VPN proxy"
+            print("vkget: download function does not support VPN proxy", flush=True)
+            if allow_fallback:
+                print("vkget: VPN fallback enabled, retrying direct", flush=True)
+                return await download_fn(url, *args, **kwargs)
+            return 1, None, "download function does not support VPN proxy"
         except Exception as exc:
             await manager.disconnect()
-            mark_failure(endpoint.id, f"{type(exc).__name__}: {exc}")
-            logs.append(f"{endpoint.ip_address}: {type(exc).__name__}: {exc}")
-            if attempt + 1 < _max_attempts():
-                print("vkget: VPN rotating endpoint", flush=True)
-            continue
+            detail = f"{type(exc).__name__}: {exc}"
+            print(f"vkget: VPN-routed download failed: {detail}", flush=True)
+            mark_profile_failure(db, profile.id, detail)
+            if allow_fallback:
+                print("vkget: disconnecting VPN", flush=True)
+                print("vkget: retrying download directly", flush=True)
+                return await download_fn(url, *args, **kwargs)
+            print("vkget: direct fallback disabled", flush=True)
+            raise
 
         if rc == 0:
-            mark_success(endpoint.id, geo)
+            mark_profile_success(db, profile.id)
             await manager.disconnect()
-            result.succeeded = True
-            result.rc = 0
-            result.path = path
-            result.log = log
-            return result
+            return rc, path, log
 
-        combined = log or "VPN download failed"
-        mark_failure(endpoint.id, combined[-400:])
-        logs.append(f"{endpoint.ip_address}: {combined[-400:]}")
-        await manager.disconnect()
-        if not vpn_eligible_failure(combined):
-            result.rc = rc
-            result.path = path
-            result.log = "\n".join(logs)
-            return result
-        if attempt + 1 < _max_attempts():
-            print("vkget: VPN rotating endpoint", flush=True)
-
-    await manager.disconnect()
-    result.log = "\n".join(logs) if logs else "VPN fallback unavailable"
-    return result
-
-
-async def download_with_vpn_fallback(download_fn, url: str, *args, **kwargs):
-    mode = vpn_mode()
-    if mode == "always":
-        vpn = await try_vpn_download(download_fn, url, *args, **kwargs)
-        if vpn.succeeded:
-            print("vkget: VK VPN download succeeded", flush=True)
-            return vpn.rc, vpn.path, vpn.log
         print(
-            "vkget: VPN unavailable or failed, trying direct download",
+            f"vkget: VPN-routed download failed: {(log or 'download failed')[-200:]}",
             flush=True,
         )
-        rc, path, log = await download_fn(url, *args, **kwargs)
-        if vpn.attempted and vpn.log:
-            log = f"{log}\n{vpn.log}".strip()
+        print("vkget: disconnecting VPN", flush=True)
+        await manager.disconnect()
+        mark_profile_failure(db, profile.id, (log or "VPN download failed")[-400:])
+        if allow_fallback:
+            print("vkget: retrying download directly", flush=True)
+            return await download_fn(url, *args, **kwargs)
+        print("vkget: direct fallback disabled", flush=True)
         return rc, path, log
-
-    rc, path, log = await download_fn(url, *args, **kwargs)
-    if rc == 0 or mode == "off":
-        return rc, path, log
-    if not vpn_eligible_failure(log):
-        return rc, path, log
-
-    print("vkget: VK direct download failed, trying Russian VPN", flush=True)
-    vpn = await try_vpn_download(download_fn, url, *args, **kwargs)
-    if vpn.succeeded:
-        print("vkget: VK VPN fallback succeeded", flush=True)
-        return vpn.rc, vpn.path, vpn.log
-    if vpn.log:
-        log = f"{log}\n{vpn.log}".strip()
-    return rc, path, log

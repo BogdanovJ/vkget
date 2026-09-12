@@ -3,105 +3,104 @@
 {% block content %}
 <section class="hero">
   <div>
-    <div class="eyebrow">RUSSIAN EGRESS</div>
-    <h1>VPN ENDPOINTS</h1>
+    <div class="eyebrow">OPTIONAL DOWNLOAD PATH</div>
+    <h1>VPN ROUTING</h1>
   </div>
-  <form method="post" action="/vpn/refresh">
-    <button type="submit">REFRESH LIST</button>
+  <span class="badge vpn-flag {{ 'on' if vpn.enabled else 'off' }}">{{ vpn.status }}</span>
+</section>
+
+{% if flash %}
+<div class="notice{{ '' if 'successful' in flash.lower() else ' bad' }}">
+  {% for line in flash.splitlines() %}
+  <div>{{ line }}</div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<section class="panel vpn-routing">
+  {% if not vpn.enabled %}
+  <p>Downloads currently use the normal internet connection.</p>
+  <div class="meta">
+    <span>GATEWAY {{ "ONLINE" if vpn.gateway_available else "OFFLINE" }}</span>
+    <span>TUNNEL DISCONNECTED</span>
+  </div>
+  {% if vpn.gateway_available == false and vpn.gateway_detail %}
+  <p class="muted">{{ vpn.gateway_detail }}</p>
+  {% endif %}
+  <form method="post" action="/vpn/enable">
+    <button type="submit">ENABLE VPN</button>
   </form>
+  {% else %}
+    {% if vpn.profile %}
+    <p>
+      <strong>{{ vpn.profile_name }}</strong>
+      <small>{{ vpn.profile_type }}</small>
+    </p>
+    <p>{{ "CONNECTED" if vpn.connected else "DISCONNECTED" }}</p>
+    {% if vpn.exit_ip %}
+    <p class="muted">{{ vpn.exit_ip }}{% if vpn.exit_country %} · {{ vpn.exit_country }}{% endif %}</p>
+    {% endif %}
+    {% else %}
+    <p>VPN is enabled, but no VPN profile is selected.</p>
+    <p class="muted">Add an OpenVPN or WireGuard profile to use VPN routing.</p>
+    {% endif %}
+    <div class="meta">
+      <span>GATEWAY {{ "ONLINE" if vpn.gateway_available else "OFFLINE" }}</span>
+      <span>FALLBACK TO DIRECT {{ "ON" if vpn.fallback_to_direct else "OFF" }}</span>
+    </div>
+    <div class="actions">
+      {% if vpn.connected %}
+      <form method="post" action="/vpn/disconnect">
+        <button class="small" type="submit">DISCONNECT</button>
+      </form>
+      {% endif %}
+      <form method="post" action="/vpn/disable">
+        <button class="small danger" type="submit">DISABLE VPN</button>
+      </form>
+    </div>
+  {% endif %}
 </section>
 
+<form class="panel" method="post" action="/vpn/fallback">
+  <h2>FALLBACK</h2>
+  <label class="check">
+    <input type="checkbox" name="enabled" value="on" {{ "checked" if vpn.fallback_to_direct else "" }}>
+    FALLBACK TO DIRECT DOWNLOAD IF VPN FAILS
+  </label>
+  <button class="small" type="submit">SAVE FALLBACK</button>
+</form>
+
 <section class="panel">
-  <h2>STATUS</h2>
-  <div class="vpn-status">
-    <div><em>STATUS</em><b>{{ vpn.status }}</b><small>MODE {{ vpn.mode|upper }}</small></div>
-    <div><em>CURRENT ENDPOINT</em><b>{{ vpn.endpoint_ip or "—" }}</b><small>SOURCE {{ vpn.source }}</small></div>
-    <div><em>REPORTED SPEED</em><b>{{ vpn.reported_speed }}</b><small>LATENCY {{ vpn.measured_latency }}</small></div>
-    <div><em>LAST DISCOVERY</em><b>{{ vpn.last_discovery }}</b><small>LIVE {{ vpn.available_count }}</small></div>
+  <h2>VPN PROFILES</h2>
+  {% for p in profiles %}
+  <div class="profile-card">
+    <div>
+      <strong>{{ p.name }}</strong>
+      <small>{{ p.display_type() }} · {{ "ENABLED" if p.enabled else "DISABLED" }}{% if p.is_default %} · SELECTED{% endif %}</small>
+      <small>
+        LAST CONNECTED: {{ p.last_connected_at|ago }}
+        {% if p.last_exit_ip %} · EXIT {{ p.last_exit_ip }}{% if p.last_exit_country %} / {{ p.last_exit_country }}{% endif %}{% endif %}
+      </small>
+      {% if p.last_error %}
+      <small class="error">{{ p.last_error }}</small>
+      {% endif %}
+    </div>
+    <div class="actions">
+      <form method="post" action="/vpn/profiles/{{ p.id }}/test">
+        <button class="small" type="submit">TEST</button>
+      </form>
+      <a class="buttonlike small" href="/vpn/profiles/{{ p.id }}/edit">EDIT</a>
+      <form method="post" action="/vpn/profiles/{{ p.id }}/use">
+        <button class="small" type="submit">USE</button>
+      </form>
+      <form method="post" action="/vpn/profiles/{{ p.id }}/delete" onsubmit="return confirm('Delete this VPN profile?');">
+        <button class="small danger" type="submit">DELETE</button>
+      </form>
+    </div>
   </div>
-</section>
-
-<section class="panel">
-  <h2>POOL</h2>
-  <div class="vpn-status wide">
-    <div><em>CURRENT LIVE</em><b>{{ vpn.pool.current_live }}</b><small>IN LATEST FEEDS</small></div>
-    <div><em>HISTORICAL ELIGIBLE</em><b>{{ vpn.pool.historical_eligible }}</b><small>STALE BUT USABLE</small></div>
-    <div><em>TOTAL CANDIDATES</em><b>{{ vpn.pool.candidate_pool }}</b><small>READY TO TRY</small></div>
-    <div><em>KNOWN GOOD</em><b>{{ vpn.pool.known_good }}</b><small>VERIFIED RU</small></div>
-    <div><em>COOLDOWN</em><b>{{ vpn.pool.cooldown }}</b><small>WAITING TO RETRY</small></div>
-  </div>
-</section>
-
-<section class="panel">
-  <h2>ENDPOINTS</h2>
-  <div class="table-wrap">
-    <table class="data">
-      <thead>
-        <tr>
-          <th>IP</th>
-          <th></th>
-          <th>SOURCE</th>
-          <th>VARIANTS</th>
-          <th>LAST SEEN</th>
-          <th>LAST SUCCESS</th>
-          <th>FAILS</th>
-          <th>COOLDOWN</th>
-          <th>SCORE</th>
-          <th>STATUS</th>
-        </tr>
-      </thead>
-      <tbody>
-      {% for e in endpoints %}
-        <tr>
-          <td>{{ e.ip_address }}</td>
-          <td>
-            <div class="actions">
-              <form method="post" action="/vpn/endpoints/{{ e.id }}/test">
-                <button class="small" type="submit">TEST</button>
-              </form>
-              {% if e.is_active %}
-              <form method="post" action="/vpn/endpoints/{{ e.id }}/disable">
-                <button class="small danger" type="submit">DISABLE</button>
-              </form>
-              {% else %}
-              <form method="post" action="/vpn/endpoints/{{ e.id }}/enable">
-                <button class="small" type="submit">ENABLE</button>
-              </form>
-              {% endif %}
-            </div>
-          </td>
-          <td>{{ e.display_source() }}</td>
-          <td>{{ e.display_protocol() }}</td>
-          <td>{{ e.last_seen_at|ago }}</td>
-          <td>{{ e.last_success_at|ago }}</td>
-          <td>{{ e.consecutive_failures }}</td>
-          <td>{{ e.display_cooldown() }}</td>
-          <td>{{ e.score }}</td>
-          <td>{{ e.display_status() }}</td>
-        </tr>
-      {% else %}
-        <tr>
-          <td colspan="10" class="muted">NO RUSSIAN ENDPOINTS YET.</td>
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  </div>
-</section>
-
-<section class="panel">
-  <h2>MANUAL ENDPOINT</h2>
-  <p class="muted">Add a stable Russian VPS or commercial profile. Discovery will not age it out.</p>
-  <form method="post" action="/vpn/manual">
-    <label>PUBLIC IPv4 · OPTIONAL IF PRESENT IN CONFIG</label>
-    <input name="ip_address" placeholder="217.150.74.41">
-    <label>HOSTNAME · OPTIONAL</label>
-    <input name="hostname" placeholder="vpn.example.ru">
-    <label>PRIORITY · HIGHER WINS</label>
-    <input type="number" name="priority" value="50">
-    <label>OPENVPN CONFIG</label>
-    <textarea name="config" rows="8" required placeholder="client&#10;dev tun&#10;proto udp&#10;remote 217.150.74.41 1194&#10;&lt;ca&gt;...&lt;/ca&gt;"></textarea>
-    <button type="submit">SAVE MANUAL ENDPOINT</button>
-  </form>
+  {% else %}
+  <p class="muted">NO VPN PROFILES YET.</p>
+  {% endfor %}
+  <p><a class="buttonlike" href="/vpn/new">+ ADD VPN PROFILE</a></p>
 </section>
 {% endblock %}
