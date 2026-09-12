@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vkget-vpn-gateway
+  namespace: vkget
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vkget-vpn-gateway
+  template:
+    metadata:
+      labels:
+        app: vkget-vpn-gateway
+    spec:
+      containers:
+        - name: vpn-gateway
+          image: ghcr.io/YOUR_USER/vkget-vpn-gateway:latest
+          imagePullPolicy: Always
+          ports:
+            - name: control
+              containerPort: 8081
+            - name: socks
+              containerPort: 1080
+          env:
+            - name: VPN_CONNECT_TIMEOUT
+              value: "20"
+          securityContext:
+            allowPrivilegeEscalation: true
+            capabilities:
+              add:
+                - NET_ADMIN
+                - NET_RAW
+          volumeMounts:
+            - name: tun
+              mountPath: /dev/net/tun
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: tun
+          hostPath:
+            path: /dev/net/tun
+            type: CharDevice
