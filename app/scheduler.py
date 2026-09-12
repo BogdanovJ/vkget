@@ -16,11 +16,14 @@ from .ytdlp import (
     PLACEHOLDER_TITLES,
     download_folder_name,
     download_video,
+    ensure_tv_compatible,
     format_upload_date,
     inspect_playlist_flat,
     is_usable_channel,
     is_usable_video_title,
     label_from_url,
+    mark_library_tv_failure,
+    next_library_tv_rewrite,
     resolve_video_metadata,
     title_from_entry,
 )
@@ -418,11 +421,11 @@ async def resolve_placeholder_queued_titles(limit: int = 1):
                 _apply_resolved_metadata(job, meta)
                 db.commit()
 
-async def run_one_download():
+async def run_one_download() -> bool:
     with SessionLocal() as db:
         cooldown = get_global_cooldown(db)
         if cooldown and cooldown > now():
-            return
+            return False
 
         job = db.scalar(
             select(Video)
@@ -435,7 +438,7 @@ async def run_one_download():
         )
 
         if not job:
-            return
+            return False
 
         if not storage_ok():
             until = now() + jitter_hours(2, 4)
@@ -446,7 +449,7 @@ async def run_one_download():
                 "Download storage is unavailable or not writable.\n"
                 f"Paused until approximately {until:%Y-%m-%d %H:%M}."
             )
-            return
+            return False
 
         video_id = job.id
         url = job.webpage_url
@@ -475,7 +478,7 @@ async def run_one_download():
     with SessionLocal() as db:
         job = db.get(Video, video_id)
         if not job or job.status not in {"QUEUED", "FAILED_TEMPORARY"}:
-            return
+            return False
 
         _apply_resolved_metadata(job, meta, folder_fallback=sub_label)
         job.status = "DOWNLOADING"
@@ -527,12 +530,12 @@ async def run_one_download():
                 external_id=external_id,
             )
         )
-        return
+        return True
 
     with SessionLocal() as db:
         job = db.get(Video, video_id)
         if not job:
-            return
+            return True
 
         notice_title = job.display_title()
         channel = job.channel
@@ -565,7 +568,7 @@ async def run_one_download():
                     external_id=external_id,
                 )
             )
-            return
+            return True
 
         kind = classify_error(log)
         retry_at = retry_time(attempts, kind)
@@ -603,9 +606,37 @@ async def run_one_download():
                     external_id=external_id,
                 )
             )
+    return True
+
+
+async def run_one_tv_reencode() -> bool:
+    """Convert one existing download that is not yet Samsung-safe."""
+    if not storage_ok():
+        return False
+    path = await next_library_tv_rewrite()
+    if not path:
+        return False
+    try:
+        new_path = await ensure_tv_compatible(path, force_remux=False)
+    except Exception as exc:
+        mark_library_tv_failure(path)
+        print(f"vkget: TV reencode failed for {path}: {exc}", flush=True)
+        return True
+    if new_path != path:
+        with SessionLocal() as db:
+            videos = db.scalars(select(Video).where(Video.local_path == path)).all()
+            for video in videos:
+                video.local_path = new_path
+            db.commit()
+        print(f"vkget: TV reencoded {path} -> {new_path}", flush=True)
+    else:
+        print(f"vkget: TV remuxed {path}", flush=True)
+    return True
+
 
 async def scheduler_loop():
     while True:
+        reencoded = False
         try:
             current = now()
 
@@ -626,9 +657,12 @@ async def scheduler_loop():
                 await scan_subscription(sub_id)
 
             await resolve_placeholder_queued_titles()
-            await run_one_download()
+            if not await run_one_download():
+                reencoded = await run_one_tv_reencode()
 
         except Exception as exc:
             print("scheduler error:", exc, flush=True)
 
+        if reencoded:
+            continue
         await asyncio.sleep(30)
