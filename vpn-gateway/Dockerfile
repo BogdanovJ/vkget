@@ -1,7 +1,16 @@
 FROM alpine:3.21
 
-RUN apk add --no-cache openvpn python3 \
-    && apk add --no-cache -X https://dl-cdn.alpinelinux.org/alpine/v3.21/community microsocks
+# microsocks is not packaged for Alpine 3.21 aarch64 (only edge/testing x86_64),
+# so build the small upstream binary instead of depending on apk.
+ARG MICROSOCKS_VERSION=1.0.5
+
+RUN apk add --no-cache openvpn python3 build-base \
+    && wget -qO- "https://github.com/rofl0r/microsocks/archive/refs/tags/v${MICROSOCKS_VERSION}.tar.gz" \
+        | tar -xz -C /tmp \
+    && make -C "/tmp/microsocks-${MICROSOCKS_VERSION}" \
+    && install -m 0755 "/tmp/microsocks-${MICROSOCKS_VERSION}/microsocks" /usr/local/bin/microsocks \
+    && rm -rf "/tmp/microsocks-${MICROSOCKS_VERSION}" \
+    && apk del build-base
 
 WORKDIR /app
 COPY ovpn.py server.py entrypoint.sh /app/
