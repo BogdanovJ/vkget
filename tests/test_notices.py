@@ -300,6 +300,44 @@ class DownloadNoticeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(download_kwargs["channel"], "VK Uploader")
         self.assertEqual(download_kwargs["title"], "Lecture 4")
 
+    async def test_idle_reencode_updates_local_path(self):
+        with self.Session() as db:
+            video = Video(
+                source="vk",
+                external_id="-1_2",
+                webpage_url="https://vk.com/video-1_2",
+                title="Talk",
+                channel="Channel",
+                status="COMPLETED",
+                local_path="/downloads/show/talk.webm",
+            )
+            db.add(video)
+            db.commit()
+            video_id = video.id
+
+        async def fake_next(root=None):
+            return "/downloads/show/talk.webm"
+
+        async def fake_ensure(path, *, force_remux=True):
+            self.assertEqual(path, "/downloads/show/talk.webm")
+            self.assertFalse(force_remux)
+            return "/downloads/show/talk.mp4"
+
+        with patch("app.scheduler.SessionLocal", self.Session), patch(
+            "app.scheduler.storage_ok", return_value=True
+        ), patch(
+            "app.scheduler.next_library_tv_rewrite", side_effect=fake_next
+        ), patch(
+            "app.scheduler.ensure_tv_compatible", side_effect=fake_ensure
+        ):
+            from app.scheduler import run_one_tv_reencode
+
+            self.assertTrue(await run_one_tv_reencode())
+
+        with self.Session() as db:
+            row = db.get(Video, video_id)
+            self.assertEqual(row.local_path, "/downloads/show/talk.mp4")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,7 +9,7 @@ Features:
 - future discovery with remembered history
 - duration and stop-word filtering
 - hard 720p ceiling
-- H.264/AAC MP4 for Smart TV playback
+- H.264 High@L4.0 + AAC-LC stereo MP4 for Samsung TV playback
 - one active download at a time
 - randomized discovery/retry scheduling
 - MariaDB persistence
@@ -26,7 +26,7 @@ Subscription downloads go in one folder named after the subscription:
 
 `/downloads/{subscription}/{YYYY-MM-DD} - {title} [{id}].mp4`
 
-Files are remuxed or transcoded to H.264 + AAC in MP4 with faststart so Samsung Smart TVs can play them. VP9/AV1/Opus sources are converted.
+Files are remuxed or transcoded to a Samsung-safe MP4: H.264 High@L4.0, 8-bit 4:2:0, even dimensions up to 1280×720, AAC-LC stereo (48 kHz), `avc1` + faststart. HE-AAC, surround, `avc3`, high level, odd sizes, and VP9/AV1/Opus sources are converted. Existing library files that fail those checks are re-encoded when the downloader is idle.
 
 One-off downloads use the uploader name, or `_single`. Placeholder leftovers (`Subscription`, `Unknown`, `NA`) are never used as folder names. If the upload date is unknown, the date prefix is omitted instead of writing `NA`.
 

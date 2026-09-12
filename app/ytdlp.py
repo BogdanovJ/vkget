@@ -589,23 +589,113 @@ def download_format(max_height: int) -> str:
 TV_VIDEO_CODECS = frozenset({"h264"})
 TV_AUDIO_CODECS = frozenset({"aac"})
 TV_PIXEL_FORMATS = frozenset({"yuv420p", "yuvj420p"})
+TV_VIDEO_PROFILES = frozenset(
+    {
+        "baseline",
+        "constrained baseline",
+        "main",
+        "high",
+        "constrained high",
+        "progressive high",
+    }
+)
+TV_AUDIO_PROFILES = frozenset({"lc", "aac-lc", "aac_lc", "low complexity"})
+TV_SAMPLE_RATES = frozenset({44100, 48000})
+TV_MAX_LEVEL = 41
+TV_MAX_WIDTH = 1280
+TV_VIDEO_TAGS = frozenset({"avc1"})
+TV_PROGRESSIVE = frozenset({"", "progressive", "unknown"})
+TV_MEDIA_SUFFIXES = frozenset({".mp4", ".webm", ".mkv", ".mov", ".m4v"})
+TV_SKIP_NAME_SUFFIXES = (".part", ".ytdl", ".compat.mp4")
+
+_failed_library_paths: set[str] = set()
+
+
+def reset_library_tv_failures() -> None:
+    _failed_library_paths.clear()
+
+
+def mark_library_tv_failure(path: str) -> None:
+    _failed_library_paths.add(path)
+
+
+def _is_attached_pic(stream: dict) -> bool:
+    disposition = stream.get("disposition") or {}
+    return bool(disposition.get("attached_pic"))
 
 
 def _probe_streams(probe: dict) -> tuple[dict | None, dict | None]:
     streams = probe.get("streams") or []
-    video = next((s for s in streams if s.get("codec_type") == "video"), None)
-    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    video = next(
+        (
+            stream
+            for stream in streams
+            if stream.get("codec_type") == "video" and not _is_attached_pic(stream)
+        ),
+        None,
+    )
+    audio = next((stream for stream in streams if stream.get("codec_type") == "audio"), None)
     return video, audio
 
 
-def tv_codec_plan(probe: dict) -> dict[str, bool]:
+def _norm_profile(value: object) -> str:
+    return str(value or "").strip().casefold()
+
+
+def _int_field(value: object) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def tv_max_size(max_height: int | None = None) -> tuple[int, int]:
+    height = int(max_height if max_height is not None else settings.max_height)
+    return TV_MAX_WIDTH, height
+
+
+def tv_codec_plan(probe: dict, max_height: int | None = None) -> dict[str, bool]:
     video, audio = _probe_streams(probe)
-    vcodec = (video or {}).get("codec_name") or ""
-    pix = ((video or {}).get("pix_fmt") or "yuv420p").lower()
-    acodec = (audio or {}).get("codec_name") or ""
-    video_ok = bool(video) and vcodec.lower() in TV_VIDEO_CODECS and pix in TV_PIXEL_FORMATS
+    max_w, max_h = tv_max_size(max_height)
+    vcodec = ((video or {}).get("codec_name") or "").lower()
+    pix = ((video or {}).get("pix_fmt") or "").lower()
+    profile = _norm_profile((video or {}).get("profile"))
+    level = _int_field((video or {}).get("level"))
+    width = _int_field((video or {}).get("width"))
+    height = _int_field((video or {}).get("height"))
+    tag = ((video or {}).get("codec_tag_string") or "").strip().lower()
+    field = ((video or {}).get("field_order") or "").strip().lower()
+    video_ok = bool(
+        video
+        and vcodec in TV_VIDEO_CODECS
+        and pix in TV_PIXEL_FORMATS
+        and profile in TV_VIDEO_PROFILES
+        and level is not None
+        and 0 < level <= TV_MAX_LEVEL
+        and width is not None
+        and height is not None
+        and width % 2 == 0
+        and height % 2 == 0
+        and 0 < width <= max_w
+        and 0 < height <= max_h
+        and tag in TV_VIDEO_TAGS
+        and field in TV_PROGRESSIVE
+    )
+
+    acodec = ((audio or {}).get("codec_name") or "").lower()
+    aprofile = _norm_profile((audio or {}).get("profile"))
+    channels = _int_field((audio or {}).get("channels"))
+    sample_rate = _int_field((audio or {}).get("sample_rate"))
     has_audio = audio is not None
-    audio_ok = (not has_audio) or acodec.lower() in TV_AUDIO_CODECS
+    audio_ok = (not has_audio) or (
+        acodec in TV_AUDIO_CODECS
+        and aprofile in TV_AUDIO_PROFILES
+        and channels is not None
+        and 0 < channels <= 2
+        and sample_rate in TV_SAMPLE_RATES
+    )
     return {
         "has_video": video is not None,
         "has_audio": has_audio,
@@ -614,22 +704,32 @@ def tv_codec_plan(probe: dict) -> dict[str, bool]:
     }
 
 
-def ffmpeg_tv_args(src: str, dest: str, probe: dict) -> list[str]:
-    plan = tv_codec_plan(probe)
+def ffmpeg_tv_args(
+    src: str,
+    dest: str,
+    probe: dict,
+    max_height: int | None = None,
+) -> list[str]:
+    plan = tv_codec_plan(probe, max_height=max_height)
     args = [
         "ffmpeg",
         "-y",
         "-i",
         src,
         "-map",
-        "0:v:0",
+        "0:V:0",
     ]
     if plan["has_audio"]:
         args += ["-map", "0:a:0"]
     args += ["-sn", "-dn"]
     if plan["copy_video"]:
-        args += ["-c:v", "copy"]
+        args += ["-c:v", "copy", "-tag:v", "avc1"]
     else:
+        max_w, max_h = tv_max_size(max_height)
+        vf = (
+            f"scale='min({max_w},iw)':'min({max_h},ih)':force_original_aspect_ratio=decrease,"
+            "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+        )
         args += [
             "-c:v",
             "libx264",
@@ -643,14 +743,105 @@ def ffmpeg_tv_args(src: str, dest: str, probe: dict) -> list[str]:
             "high",
             "-level",
             "4.0",
+            "-tag:v",
+            "avc1",
+            "-vf",
+            vf,
         ]
     if plan["has_audio"]:
         if plan["copy_audio"]:
             args += ["-c:a", "copy"]
         else:
-            args += ["-c:a", "aac", "-b:a", "160k", "-ac", "2", "-ar", "48000"]
+            args += [
+                "-c:a",
+                "aac",
+                "-profile:a",
+                "aac_low",
+                "-b:a",
+                "160k",
+                "-ac",
+                "2",
+                "-ar",
+                "48000",
+            ]
     args += ["-movflags", "+faststart", "-f", "mp4", dest]
     return args
+
+
+def mp4_has_faststart(path: str) -> bool:
+    try:
+        with open(path, "rb") as handle:
+            while True:
+                header = handle.read(8)
+                if len(header) < 8:
+                    return False
+                size = int.from_bytes(header[:4], "big")
+                box = header[4:8]
+                if box == b"moov":
+                    return True
+                if box == b"mdat":
+                    return False
+                if size == 1:
+                    ext = handle.read(8)
+                    if len(ext) < 8:
+                        return False
+                    size = int.from_bytes(ext, "big")
+                    skip = size - 16
+                elif size == 0:
+                    return False
+                else:
+                    skip = size - 8
+                if skip < 0:
+                    return False
+                handle.seek(skip, os.SEEK_CUR)
+    except OSError:
+        return False
+
+
+def is_mp4_container(probe: dict) -> bool:
+    name = ((probe.get("format") or {}).get("format_name") or "").lower()
+    return "mp4" in {part.strip() for part in name.split(",") if part.strip()}
+
+
+def is_tv_ready(probe: dict, path: str = "", max_height: int | None = None) -> bool:
+    """True when the file already matches the Samsung-safe H.264/AAC-LC MP4 profile."""
+    plan = tv_codec_plan(probe, max_height=max_height)
+    if not plan["has_video"] or not plan["copy_video"]:
+        return False
+    if plan["has_audio"] and not plan["copy_audio"]:
+        return False
+    if path and Path(path).suffix.lower() != ".mp4":
+        return False
+    if not is_mp4_container(probe):
+        return False
+    if path and not mp4_has_faststart(path):
+        return False
+    return True
+
+
+def is_library_media_path(path: Path) -> bool:
+    name = path.name
+    if name.startswith("."):
+        return False
+    lowered = name.lower()
+    if any(lowered.endswith(suffix) for suffix in TV_SKIP_NAME_SUFFIXES):
+        return False
+    return path.suffix.lower() in TV_MEDIA_SUFFIXES
+
+
+def iter_library_media(root: str | Path) -> list[Path]:
+    base = Path(root)
+    if not base.is_dir():
+        return []
+    found: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(base):
+        dirnames[:] = [name for name in dirnames if not name.startswith(".")]
+        for name in filenames:
+            candidate = Path(dirpath) / name
+            if is_library_media_path(candidate):
+                found.append(candidate)
+    found.sort()
+    return found
 
 
 async def probe_media(path: str) -> dict:
@@ -660,7 +851,9 @@ async def probe_media(path: str) -> dict:
             "-v",
             "error",
             "-show_entries",
-            "format=format_name:stream=codec_type,codec_name,pix_fmt",
+            "format=format_name:stream=codec_type,codec_name,codec_tag_string,"
+            "profile,level,pix_fmt,width,height,field_order,channels,sample_rate:"
+            "stream_disposition=attached_pic",
             "-of",
             "json",
             path,
@@ -672,16 +865,21 @@ async def probe_media(path: str) -> dict:
     return json.loads(out or "{}")
 
 
-async def ensure_tv_compatible(path: str) -> str:
-    """Remux or transcode to H.264/AAC MP4 with faststart for Smart TVs."""
+async def ensure_tv_compatible(path: str, *, force_remux: bool = True) -> str:
+    """Remux or transcode to H.264/AAC-LC MP4 with faststart for Smart TVs."""
     src = Path(path)
     if not src.is_file():
         return path
     probe = await probe_media(str(src))
     if not tv_codec_plan(probe)["has_video"]:
         raise RuntimeError("downloaded file has no video stream")
+    if not force_remux and is_tv_ready(probe, str(src)):
+        return str(src)
     dest = src.with_name(f"{src.stem}.compat.mp4")
-    rc, out, err = await _run(ffmpeg_tv_args(str(src), str(dest), probe), timeout=2 * 60 * 60)
+    rc, out, err = await _run(
+        ffmpeg_tv_args(str(src), str(dest), probe),
+        timeout=2 * 60 * 60,
+    )
     if rc != 0:
         try:
             dest.unlink()
@@ -696,6 +894,27 @@ async def ensure_tv_compatible(path: str) -> str:
         except OSError:
             pass
     return str(final)
+
+
+async def next_library_tv_rewrite(root: str | Path | None = None) -> str | None:
+    """Return the next existing download that is not yet TV-safe."""
+    base = root if root is not None else settings.download_root
+    for path in iter_library_media(base):
+        key = str(path)
+        if key in _failed_library_paths:
+            continue
+        try:
+            probe = await probe_media(key)
+        except Exception:
+            _failed_library_paths.add(key)
+            continue
+        if is_tv_ready(probe, key):
+            continue
+        if not tv_codec_plan(probe)["has_video"]:
+            _failed_library_paths.add(key)
+            continue
+        return key
+    return None
 
 
 async def _download_once(
