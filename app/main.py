@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .db import ensure_schema, get_db
-from .models import AppState, Subscription, Video
+from .models import AppState, Subscription, Video, VpnEndpoint
 from .scheduler import (
     recover_interrupted_downloads,
     scan_subscription,
@@ -21,6 +21,10 @@ from .scheduler import (
     get_global_cooldown,
     now
 )
+from .vpn.discovery import maybe_refresh_vpn_catalogue
+from .vpn.manager import manager, mark_success
+from .vpn.status import serialize_endpoint, vpn_dashboard_status
+from .vpn.util import format_ago, format_speed
 from .ytdlp import (
     inspect_url,
     is_usable_channel,
@@ -54,6 +58,8 @@ def format_when(value: datetime | None, current: datetime | None = None) -> str:
 templates.env.filters["stamp"] = format_stamp
 templates.env.filters["when"] = format_when
 templates.env.filters["vkvideo"] = to_vkvideo
+templates.env.filters["ago"] = format_ago
+templates.env.filters["speed"] = format_speed
 
 @app.on_event("startup")
 async def startup():
@@ -141,6 +147,7 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
             },
             "next_download": next_download,
             "max_height": settings.max_height,
+            "vpn": vpn_dashboard_status(db, current),
         },
     )
 
@@ -411,6 +418,102 @@ def queue(request: Request, db: Session = Depends(get_db)):
         name="queue.html",
         context={"videos": videos},
     )
+
+@app.get("/vpn", response_class=HTMLResponse)
+def vpn_page(request: Request, db: Session = Depends(get_db)):
+    endpoints = db.scalars(
+        select(VpnEndpoint).order_by(VpnEndpoint.score.desc(), VpnEndpoint.ip_address.asc())
+    ).all()
+    return templates.TemplateResponse(
+        request=request,
+        name="vpn.html",
+        context={
+            "vpn": vpn_dashboard_status(db),
+            "endpoints": endpoints,
+        },
+    )
+
+
+@app.post("/vpn/refresh")
+async def vpn_refresh_form():
+    await maybe_refresh_vpn_catalogue(force=True)
+    return RedirectResponse("/vpn", status_code=303)
+
+
+@app.post("/vpn/endpoints/{endpoint_id}/enable")
+def vpn_enable_endpoint(endpoint_id: int, db: Session = Depends(get_db)):
+    row = db.get(VpnEndpoint, endpoint_id)
+    if not row:
+        raise HTTPException(404)
+    row.is_active = True
+    db.commit()
+    return RedirectResponse("/vpn", status_code=303)
+
+
+@app.post("/vpn/endpoints/{endpoint_id}/disable")
+def vpn_disable_endpoint(endpoint_id: int, db: Session = Depends(get_db)):
+    row = db.get(VpnEndpoint, endpoint_id)
+    if not row:
+        raise HTTPException(404)
+    row.is_active = False
+    db.commit()
+    return RedirectResponse("/vpn", status_code=303)
+
+
+@app.post("/vpn/endpoints/{endpoint_id}/test")
+async def vpn_test_endpoint_form(endpoint_id: int, db: Session = Depends(get_db)):
+    await _test_endpoint(endpoint_id, db)
+    return RedirectResponse("/vpn", status_code=303)
+
+
+@app.get("/api/vpn/status")
+def api_vpn_status(db: Session = Depends(get_db)):
+    return vpn_dashboard_status(db)
+
+
+@app.get("/api/vpn/endpoints")
+def api_vpn_endpoints(db: Session = Depends(get_db)):
+    current = now()
+    rows = db.scalars(
+        select(VpnEndpoint).order_by(VpnEndpoint.score.desc(), VpnEndpoint.ip_address.asc())
+    ).all()
+    return {
+        "endpoints": [serialize_endpoint(row, current) for row in rows],
+    }
+
+
+@app.post("/api/vpn/refresh")
+async def api_vpn_refresh():
+    stats = await maybe_refresh_vpn_catalogue(force=True)
+    return {
+        "ok": True,
+        "found": getattr(stats, "found", 0),
+        "added": getattr(stats, "added", 0),
+        "updated": getattr(stats, "updated", 0),
+    }
+
+
+@app.post("/api/vpn/test/{endpoint_id}")
+async def api_vpn_test(endpoint_id: int, db: Session = Depends(get_db)):
+    result = await _test_endpoint(endpoint_id, db)
+    return result
+
+
+async def _test_endpoint(endpoint_id: int, db: Session):
+    row = db.get(VpnEndpoint, endpoint_id)
+    if not row:
+        raise HTTPException(404)
+    geo = await manager.connect_and_verify(row)
+    await manager.disconnect()
+    if geo:
+        mark_success(endpoint_id, geo)
+        return {"ok": True, "ip": geo.ip, "country": geo.country}
+    row = db.get(VpnEndpoint, endpoint_id)
+    return {
+        "ok": False,
+        "detail": row.failure_reason if row else "test failed",
+    }
+
 
 @app.get("/healthz")
 def healthz():

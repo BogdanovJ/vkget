@@ -32,3 +32,13 @@ jobs:
           tags: ghcr.io/bogdanovj/vkget:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./vpn-gateway
+          file: ./vpn-gateway/Dockerfile
+          push: true
+          platforms: linux/arm64
+          tags: ghcr.io/bogdanovj/vkget-vpn-gateway:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

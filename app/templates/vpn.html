@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}VPN · VKGET{% endblock %}
+{% block content %}
+<section class="hero">
+  <div>
+    <div class="eyebrow">RUSSIAN EGRESS</div>
+    <h1>VPN ENDPOINTS</h1>
+  </div>
+  <form method="post" action="/vpn/refresh">
+    <button type="submit">REFRESH LIST</button>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>STATUS</h2>
+  <div class="vpn-status">
+    <div><em>STATUS</em><b>{{ vpn.status }}</b><small>MODE {{ vpn.mode|upper }}</small></div>
+    <div><em>CURRENT ENDPOINT</em><b>{{ vpn.endpoint_ip or "—" }}</b><small>SOURCE {{ vpn.source }}</small></div>
+    <div><em>REPORTED SPEED</em><b>{{ vpn.reported_speed }}</b><small>LATENCY {{ vpn.measured_latency }}</small></div>
+    <div><em>LAST DISCOVERY</em><b>{{ vpn.last_discovery }}</b><small>AVAILABLE {{ vpn.available_count }}</small></div>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>ENDPOINTS</h2>
+  <div class="table-wrap">
+    <table class="data">
+      <thead>
+        <tr>
+          <th>IP</th>
+          <th>HOSTNAME</th>
+          <th>SOURCE</th>
+          <th>PROTOCOL</th>
+          <th>SPEED</th>
+          <th>PING</th>
+          <th>SESSIONS</th>
+          <th>LAST SEEN</th>
+          <th>LAST TESTED</th>
+          <th>LAST SUCCESS</th>
+          <th>FAILURES</th>
+          <th>STATUS</th>
+          <th>SCORE</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for e in endpoints %}
+        <tr>
+          <td>{{ e.ip_address }}</td>
+          <td>{{ e.hostname or "—" }}</td>
+          <td>{{ e.display_source() }}</td>
+          <td>{{ e.display_protocol() }}</td>
+          <td>{{ e.reported_speed_bps|speed }}</td>
+          <td>{{ e.reported_ping_ms if e.reported_ping_ms is not none else "—" }}</td>
+          <td>{{ e.reported_sessions if e.reported_sessions is not none else "—" }}</td>
+          <td>{{ e.last_seen_at|ago }}</td>
+          <td>{{ e.last_checked_at|ago }}</td>
+          <td>{{ e.last_success_at|ago }}</td>
+          <td>{{ e.failed_connections }}</td>
+          <td>{{ e.display_status() }}</td>
+          <td>{{ e.score }}</td>
+          <td>
+            <div class="actions">
+              <form method="post" action="/vpn/endpoints/{{ e.id }}/test">
+                <button class="small" type="submit">TEST</button>
+              </form>
+              {% if e.is_active %}
+              <form method="post" action="/vpn/endpoints/{{ e.id }}/disable">
+                <button class="small danger" type="submit">DISABLE</button>
+              </form>
+              {% else %}
+              <form method="post" action="/vpn/endpoints/{{ e.id }}/enable">
+                <button class="small" type="submit">ENABLE</button>
+              </form>
+              {% endif %}
+            </div>
+          </td>
+        </tr>
+      {% else %}
+        <tr>
+          <td colspan="14" class="muted">NO RUSSIAN ENDPOINTS YET.</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

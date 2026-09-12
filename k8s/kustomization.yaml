@@ -6,6 +6,8 @@ resources:
   - deployment.yaml
   - service.yaml
   - ingress.yaml
+  - vpn-gateway-deployment.yaml
+  - vpn-gateway-service.yaml
 
 # Add encrypted secret files after creating them:
 #  - secret.sops.yaml

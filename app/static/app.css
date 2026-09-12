@@ -258,6 +258,52 @@ footer{
   letter-spacing:2px;
 }
 
+.vpn-status{
+  display:grid;
+  grid-template-columns:repeat(4,1fr);
+  gap:16px;
+  margin-bottom:12px;
+}
+
+.vpn-status em{
+  display:block;
+  font-style:normal;
+  font-size:10px;
+  letter-spacing:1.5px;
+  color:var(--accent);
+}
+
+.vpn-status b{
+  display:block;
+  font-size:18px;
+  margin:6px 0 4px;
+}
+
+.vpn-status small{
+  display:block;
+  font-size:11px;
+  opacity:.7;
+}
+
+.table-wrap{overflow-x:auto}
+table.data{
+  width:100%;
+  border-collapse:collapse;
+  font-size:11px;
+}
+table.data th,table.data td{
+  text-align:left;
+  padding:8px 6px;
+  border-bottom:1px dashed rgba(232,230,217,.45);
+  white-space:nowrap;
+  vertical-align:top;
+}
+table.data th{
+  color:var(--accent);
+  letter-spacing:1px;
+  font-weight:800;
+}
+
 @media(max-width:760px){
   .grid{grid-template-columns:1fr}
   .stats{grid-template-columns:1fr 1fr}
@@ -266,6 +312,7 @@ footer{
   .schedule{grid-template-columns:1fr}
   .schedule-item{border-right:0;border-bottom:2px solid var(--fg)}
   .schedule-item:last-child{border-bottom:0}
+  .vpn-status{grid-template-columns:1fr 1fr}
   nav{gap:10px}
   .topbar{padding:0 14px}
   .shell{padding:24px 14px 50px}

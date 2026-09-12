@@ -1,6 +1,15 @@
 from __future__ import annotations
 from datetime import datetime
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .db import Base
 
@@ -90,3 +99,79 @@ class AppState(Base):
 
     key: Mapped[str] = mapped_column(String(100), primary_key=True)
     value: Mapped[str] = mapped_column(Text, default="")
+
+
+class VpnEndpoint(Base):
+    __tablename__ = "vpn_endpoints"
+    __table_args__ = (
+        UniqueConstraint("ip_address", name="uq_vpn_endpoint_ip"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    hostname: Mapped[str] = mapped_column(String(255), default="")
+    ip_address: Mapped[str] = mapped_column(String(45))
+    country: Mapped[str] = mapped_column(String(8), default="RU")
+    provider: Mapped[str] = mapped_column(String(100), default="vpngate")
+    source: Mapped[str] = mapped_column(String(50), default="vpngate")
+    sources: Mapped[str] = mapped_column(String(200), default="vpngate")
+    openvpn_udp_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    openvpn_tcp_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    openvpn_udp_config: Mapped[str | None] = mapped_column(Text, nullable=True)
+    openvpn_tcp_config: Mapped[str | None] = mapped_column(Text, nullable=True)
+    udp_config_is_ip: Mapped[bool] = mapped_column(Boolean, default=False)
+    tcp_config_is_ip: Mapped[bool] = mapped_column(Boolean, default=False)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_failure_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_available: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_stale: Mapped[bool] = mapped_column(Boolean, default=False)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
+    successful_connections: Mapped[int] = mapped_column(Integer, default=0)
+    failed_connections: Mapped[int] = mapped_column(Integer, default=0)
+    reported_speed_bps: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    reported_ping_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reported_sessions: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reported_uptime_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    score: Mapped[int] = mapped_column(Integer, default=0)
+    measured_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    measured_download_speed_bps: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cooldown_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    verified_country: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    last_verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+    def display_source(self) -> str:
+        labels = {
+            "vpngate": "VPN Gate",
+            "vpnobratno": "VPN Obratno",
+            "manual": "Manual",
+        }
+        return labels.get(self.source, self.source or "UNKNOWN")
+
+    def display_protocol(self) -> str:
+        parts: list[str] = []
+        if self.openvpn_udp_config:
+            parts.append("IP UDP" if self.udp_config_is_ip else "UDP")
+        if self.openvpn_tcp_config:
+            parts.append("IP TCP" if self.tcp_config_is_ip else "TCP")
+        return " / ".join(parts) or "NONE"
+
+    def display_status(self, current: datetime | None = None) -> str:
+        when = current or now()
+        if not self.is_active:
+            return "DISABLED"
+        if self.cooldown_until and self.cooldown_until > when:
+            return "COOLDOWN"
+        if self.is_stale:
+            return "STALE"
+        if not self.is_available:
+            return "DOWN"
+        return "READY"
+
+    def has_usable_config(self) -> bool:
+        return bool(self.openvpn_udp_config or self.openvpn_tcp_config)

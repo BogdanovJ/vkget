@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import time
 
 import shutil
 import tempfile
@@ -364,6 +365,7 @@ def _write_cookie_file(extra_cookies: list[dict] | None = None) -> tuple[str | N
 def common_args(
     extra_cookies: list[dict] | None = None,
     user_agent: str | None = None,
+    proxy: str | None = None,
 ) -> tuple[list[str], str | None]:
     args = ["/usr/local/bin/yt-dlp"]
     cookie_path, cleanup = _write_cookie_file(extra_cookies)
@@ -371,26 +373,122 @@ def common_args(
         args += ["--cookies", cookie_path]
     if user_agent:
         args += ["--user-agent", user_agent]
+    if proxy:
+        args += ["--proxy", proxy]
     return args, cleanup
 
 
-async def _run(args: list[str], timeout: int | None = None):
+_YTDLP_SPEED_RE = re.compile(
+    r"\[download\].*?at\s+([0-9]*\.?[0-9]+)\s*([KMGT]i?B)/s",
+    re.I,
+)
+
+
+def parse_ytdlp_speed_bps(line: str) -> int | None:
+    match = _YTDLP_SPEED_RE.search(line or "")
+    if not match:
+        return None
+    number = float(match.group(1))
+    unit = match.group(2).upper()
+    multiplier = 1
+    if unit.startswith("K"):
+        multiplier = 1024
+    elif unit.startswith("M"):
+        multiplier = 1024 * 1024
+    elif unit.startswith("G"):
+        multiplier = 1024 * 1024 * 1024
+    elif unit.startswith("T"):
+        multiplier = 1024 * 1024 * 1024 * 1024
+    return int(number * multiplier)
+
+
+def _vpn_speed_limits(proxy: str | None) -> tuple[int | None, int | None]:
+    if not proxy:
+        return None, None
+    rate = getattr(settings, "vpn_min_download_rate", None)
+    duration = getattr(settings, "vpn_slow_rate_duration", None)
+    if not isinstance(rate, str):
+        return None, None
+    from .vpn.util import parse_rate_bps
+
+    parsed = parse_rate_bps(rate)
+    if not parsed:
+        return None, None
+    if not isinstance(duration, int):
+        duration = 120
+    return parsed, max(duration, 1)
+
+
+async def _run(
+    args: list[str],
+    timeout: int | None = None,
+    min_rate_bps: int | None = None,
+    slow_rate_duration: int | None = None,
+):
     proc = await asyncio.create_subprocess_exec(
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
+    if min_rate_bps is None or slow_rate_duration is None:
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise
+        return (
+            proc.returncode,
+            stdout.decode(errors="replace"),
+            stderr.decode(errors="replace"),
+        )
+
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+    below_since: float | None = None
+    slow = False
+
+    async def consume(stream, bucket: list[str]):
+        nonlocal below_since, slow
+        while True:
+            line = await stream.readline()
+            if not line:
+                return
+            text = line.decode(errors="replace")
+            bucket.append(text)
+            speed = parse_ytdlp_speed_bps(text)
+            if speed is None:
+                continue
+            if speed < min_rate_bps:
+                if below_since is None:
+                    below_since = time.monotonic()
+                elif time.monotonic() - below_since >= slow_rate_duration:
+                    slow = True
+                    proc.kill()
+                    return
+            else:
+                below_since = None
+
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        await asyncio.wait_for(
+            asyncio.gather(
+                consume(proc.stdout, stdout_chunks),
+                consume(proc.stderr, stderr_chunks),
+                proc.wait(),
+            ),
+            timeout=timeout,
+        )
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
         raise
-    return (
-        proc.returncode,
-        stdout.decode(errors="replace"),
-        stderr.decode(errors="replace"),
-    )
+
+    out = "".join(stdout_chunks)
+    err = "".join(stderr_chunks)
+    if slow:
+        err = f"{err}\nVPN_SLOW_RATE: download stayed below minimum rate".strip()
+        return 1, out, err
+    return proc.returncode, out, err
 
 
 async def fetch_flaresolverr_cookies(url: str) -> tuple[list[dict], str | None]:
@@ -923,10 +1021,11 @@ async def _download_once(
     fmt: str,
     extra_cookies: list[dict] | None = None,
     user_agent: str | None = None,
+    proxy: str | None = None,
 ):
     cleanup = None
     try:
-        args, cleanup = common_args(extra_cookies, user_agent)
+        args, cleanup = common_args(extra_cookies, user_agent, proxy=proxy)
         args += [
             "--format", fmt,
             "--merge-output-format", "mp4",
@@ -944,7 +1043,13 @@ async def _download_once(
             "--output", output,
             url,
         ]
-        rc, out, err = await _run(args, timeout=4 * 60 * 60)
+        min_rate, slow_for = _vpn_speed_limits(proxy)
+        rc, out, err = await _run(
+            args,
+            timeout=4 * 60 * 60,
+            min_rate_bps=min_rate,
+            slow_rate_duration=slow_for,
+        )
         lines = [x.strip() for x in out.splitlines() if x.strip()]
         final_path = lines[-1] if lines and rc == 0 else None
         return rc, final_path, (err + "\n" + out).strip()
@@ -963,6 +1068,7 @@ async def download_video(
     video_id: str = "",
     upload_date: str | None = None,
     folder: str | None = None,
+    proxy: str | None = None,
 ):
     output_path = build_download_output(
         folder=download_folder_name(
@@ -991,8 +1097,14 @@ async def download_video(
         return rc, tv_path, log
 
     for candidate in download_url_candidates(url):
+        once_kwargs = {"proxy": proxy} if proxy else {}
         try:
-            rc, final_path, log = await _download_once(candidate, output, fmt)
+            rc, final_path, log = await _download_once(
+                candidate,
+                output,
+                fmt,
+                **once_kwargs,
+            )
         except asyncio.TimeoutError:
             last_rc = 1
             last_path = None
@@ -1014,6 +1126,7 @@ async def download_video(
                 fmt,
                 extra_cookies=cookies,
                 user_agent=user_agent,
+                **once_kwargs,
             )
         except asyncio.TimeoutError:
             last_log = f"{last_log}\n{candidate}: timed out after FlareSolverr".strip()
