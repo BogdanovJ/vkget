@@ -18,11 +18,11 @@ class VpnDownloadResult:
 
 
 def _max_attempts() -> int:
-    value = getattr(settings, "vpn_max_endpoint_attempts", 3)
+    value = getattr(settings, "vpn_max_endpoint_attempts", 6)
     try:
         return max(int(value), 1)
     except (TypeError, ValueError):
-        return 3
+        return 6
 
 
 async def try_vpn_download(download_fn, url: str, *args, **kwargs) -> VpnDownloadResult:
@@ -40,7 +40,7 @@ async def try_vpn_download(download_fn, url: str, *args, **kwargs) -> VpnDownloa
         result.attempted = True
         result.endpoint_ids.append(endpoint.id)
         print(
-            f"vkget: VPN endpoint selected: {endpoint.ip_address} score={endpoint.score}",
+            f"vkget: VPN candidate selected: {endpoint.ip_address} score={endpoint.score}",
             flush=True,
         )
         geo = await manager.connect_and_verify(endpoint)

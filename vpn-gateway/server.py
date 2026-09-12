@@ -17,7 +17,7 @@ from ovpn import sanitize_ovpn
 
 LISTEN_HOST = os.getenv("VPN_GATEWAY_LISTEN", "0.0.0.0")
 LISTEN_PORT = int(os.getenv("VPN_GATEWAY_PORT", "8081"))
-CONNECT_TIMEOUT = int(os.getenv("VPN_CONNECT_TIMEOUT", "20"))
+CONNECT_TIMEOUT = int(os.getenv("VPN_CONNECT_TIMEOUT", "8"))
 OPENVPN_BIN = os.getenv("OPENVPN_BIN", "openvpn")
 DEBUG = os.getenv("VPN_GATEWAY_DEBUG", "").strip().lower() in {"1", "true", "yes"}
 
@@ -34,6 +34,15 @@ _state = {
 
 def _log(message: str) -> None:
     print(f"vpn-gateway: {message}", flush=True)
+
+
+def write_http_body(write, body: bytes) -> bool:
+    try:
+        write(body)
+        return True
+    except (BrokenPipeError, ConnectionResetError) as exc:
+        _log(f"client disconnected before response write: {type(exc).__name__}")
+        return False
 
 
 def _terminate(proc: subprocess.Popen | None) -> None:
@@ -167,11 +176,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send(self, code: int, payload: dict) -> None:
         body = json.dumps(payload).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            write_http_body(self.wfile.write, body)
+        except (BrokenPipeError, ConnectionResetError) as exc:
+            _log(f"client disconnected before response write: {type(exc).__name__}")
 
     def do_GET(self):
         if self.path in {"/healthz", "/"}:

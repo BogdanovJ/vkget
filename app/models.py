@@ -118,8 +118,13 @@ class VpnEndpoint(Base):
     openvpn_tcp_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
     openvpn_udp_config: Mapped[str | None] = mapped_column(Text, nullable=True)
     openvpn_tcp_config: Mapped[str | None] = mapped_column(Text, nullable=True)
+    openvpn_udp_ddns_config: Mapped[str | None] = mapped_column(Text, nullable=True)
+    openvpn_tcp_ddns_config: Mapped[str | None] = mapped_column(Text, nullable=True)
     udp_config_is_ip: Mapped[bool] = mapped_column(Boolean, default=False)
     tcp_config_is_ip: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_good_variant: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    last_failed_variant: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    priority: Mapped[int] = mapped_column(Integer, default=0)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -153,25 +158,61 @@ class VpnEndpoint(Base):
         }
         return labels.get(self.source, self.source or "UNKNOWN")
 
+    def is_manual(self) -> bool:
+        if self.source == "manual":
+            return True
+        return "manual" in {
+            part.strip() for part in (self.sources or "").split(",") if part.strip()
+        }
+
     def display_protocol(self) -> str:
         parts: list[str] = []
-        if self.openvpn_udp_config:
-            parts.append("IP UDP" if self.udp_config_is_ip else "UDP")
-        if self.openvpn_tcp_config:
-            parts.append("IP TCP" if self.tcp_config_is_ip else "TCP")
+        if self.openvpn_udp_config and self.udp_config_is_ip:
+            parts.append("IP UDP")
+        if self.openvpn_udp_ddns_config or (
+            self.openvpn_udp_config and not self.udp_config_is_ip
+        ):
+            parts.append("UDP")
+        if self.openvpn_tcp_config and self.tcp_config_is_ip:
+            parts.append("IP TCP")
+        if self.openvpn_tcp_ddns_config or (
+            self.openvpn_tcp_config and not self.tcp_config_is_ip
+        ):
+            parts.append("TCP")
         return " / ".join(parts) or "NONE"
 
     def display_status(self, current: datetime | None = None) -> str:
         when = current or now()
         if not self.is_active:
+            if self.is_stale and not self.is_manual():
+                return "Inactive"
             return "DISABLED"
         if self.cooldown_until and self.cooldown_until > when:
-            return "COOLDOWN"
+            return "Cooldown"
+        verified = self.verified_country == "RU" and self.last_verified_at
+        if verified and not self.consecutive_failures:
+            return "Known good"
         if self.is_stale:
-            return "STALE"
-        if not self.is_available:
-            return "DOWN"
-        return "READY"
+            return "Stale"
+        return "Fresh"
 
     def has_usable_config(self) -> bool:
-        return bool(self.openvpn_udp_config or self.openvpn_tcp_config)
+        return bool(
+            self.openvpn_udp_config
+            or self.openvpn_tcp_config
+            or self.openvpn_udp_ddns_config
+            or self.openvpn_tcp_ddns_config
+        )
+
+    def display_cooldown(self, current: datetime | None = None) -> str:
+        when = current or now()
+        if not self.cooldown_until or self.cooldown_until <= when:
+            return "—"
+        secs = int((self.cooldown_until - when).total_seconds())
+        if secs < 60:
+            return f"{secs}s"
+        if secs < 3600:
+            return f"{secs // 60} min"
+        if secs < 86400:
+            return f"{secs // 3600}h"
+        return f"{secs // 86400}d"

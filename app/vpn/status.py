@@ -5,12 +5,50 @@ from datetime import datetime
 import httpx
 from sqlalchemy import func, select
 
-from ..config import settings
 from ..models import AppState, Video, VpnEndpoint
 from .discovery import DISCOVERY_STATE_KEY
 from .fallback import vpn_mode
-from .manager import get_best_endpoint
+from .manager import endpoint_is_candidate, get_best_endpoint
+from .scoring import is_known_good
 from .util import format_ago, format_speed, now
+
+
+def compute_pool_stats(db, current: datetime | None = None) -> dict:
+    when = current or now()
+    rows = list(db.scalars(select(VpnEndpoint)).all())
+    current_live = 0
+    historical_eligible = 0
+    candidate_pool = 0
+    known_good = 0
+    cooldown = 0
+    inactive = 0
+    for row in rows:
+        status = row.display_status(when)
+        if status == "Inactive":
+            inactive += 1
+        if status == "Cooldown":
+            cooldown += 1
+        if is_known_good(row, when) and row.is_active:
+            known_good += 1
+        if row.is_active and not row.is_stale:
+            current_live += 1
+        elif (
+            row.is_active
+            and row.is_stale
+            and row.has_usable_config()
+            and not (row.cooldown_until and row.cooldown_until > when)
+        ):
+            historical_eligible += 1
+        if endpoint_is_candidate(row, when):
+            candidate_pool += 1
+    return {
+        "current_live": current_live,
+        "historical_eligible": historical_eligible,
+        "candidate_pool": candidate_pool,
+        "known_good": known_good,
+        "cooldown": cooldown,
+        "inactive": inactive,
+    }
 
 
 def gateway_status_sync() -> dict:
@@ -42,12 +80,8 @@ def vpn_dashboard_status(db, current: datetime | None = None) -> dict:
     when = current or now()
     mode = vpn_mode()
     gateway = gateway_status_sync()
-    available = db.scalar(
-        select(func.count()).select_from(VpnEndpoint).where(
-            VpnEndpoint.is_active.is_(True),
-            VpnEndpoint.is_stale.is_(False),
-        )
-    ) or 0
+    pool = compute_pool_stats(db, when)
+    available = pool["current_live"]
     connected_ip = gateway.get("endpoint_ip")
     current_row = None
     if connected_ip:
@@ -85,6 +119,7 @@ def vpn_dashboard_status(db, current: datetime | None = None) -> dict:
         ),
         "last_discovery": format_ago(last_discovery_at(db), when),
         "available_count": available,
+        "pool": pool,
         "download_in_progress": bool(
             db.scalar(
                 select(func.count()).select_from(Video).where(Video.status == "DOWNLOADING")
@@ -121,4 +156,10 @@ def serialize_endpoint(row: VpnEndpoint, current: datetime | None = None) -> dic
         "is_available": row.is_available,
         "is_stale": row.is_stale,
         "failure_reason": row.failure_reason,
+        "variants": row.display_protocol(),
+        "last_good_variant": row.last_good_variant,
+        "last_failed_variant": row.last_failed_variant,
+        "cooldown_until": row.cooldown_until.isoformat() if row.cooldown_until else None,
+        "cooldown": row.display_cooldown(when),
+        "priority": row.priority,
     }

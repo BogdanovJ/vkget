@@ -74,7 +74,8 @@ Endpoint catalogue:
 - Primary machine-readable source: the [VPN Gate CSV API](https://www.vpngate.net/api/iphone/) (`CountryShort == RU`, usable OpenVPN configs only).
 - Extra Russia-specific discovery: [VPN Obratno](https://vpnobratno.info/en/). HTML/parser failures must not break vkget.
 - Rows are keyed by public IPv4. The same server from both sources is one row.
-- OpenVPN profiles, health, and scores are stored in MariaDB (`vpn_endpoints`). Missing servers age out (`VPN_STALE_AFTER_HOURS`, then `VPN_DISABLE_AFTER_DAYS`) instead of being deleted on one refresh.
+- OpenVPN profiles, health, and scores are stored in MariaDB (`vpn_endpoints`). Latest discovery is merged into a historical pool; missing volunteer servers are marked stale after `VPN_STALE_AFTER_HOURS` and inactive after `VPN_DISABLE_AFTER_DAYS`, not deleted. Stale rows stay eligible. Manual rows are never aged out.
+- Each row can store multiple OpenVPN variants (IP UDP, UDP, IP TCP, TCP). A connect attempt tries every variant for that IP before the endpoint is marked failed.
 
 `VK_VPN_MODE`:
 
@@ -91,8 +92,10 @@ New environment variables (also in `.env.example` and `k8s/configmap.yaml`):
 | `VPN_DISCOVERY_INTERVAL_MINUTES` | `30` | Catalogue refresh interval |
 | `VPN_GATEWAY_URL` | in-cluster gateway `:8081` | Control API (`/connect`, `/disconnect`, `/status`) |
 | `VPN_PROXY_URL` | in-cluster SOCKS `:1080` | Passed to yt-dlp as `--proxy` |
-| `VPN_MAX_ENDPOINT_ATTEMPTS` | `3` | Endpoints to try per download |
-| `VPN_CONNECT_TIMEOUT` | `20` | OpenVPN connect timeout (seconds) |
+| `VPN_MAX_ENDPOINT_ATTEMPTS` | `6` | Endpoints to try per download (all variants of one IP count as one attempt) |
+| `VPN_CONNECT_TIMEOUT` | `8` | OpenVPN probe/connect timeout (seconds); not applied to video downloads |
+| `VPN_TCP_PROBE_TIMEOUT` | `2` | Optional TCP reachability probe before starting OpenVPN |
+| `VPN_MANUAL_PRIORITY` | `50` | Score bonus for `source=manual` endpoints |
 | `VPN_VERIFY_TIMEOUT` | `10` | RU exit-IP lookup timeout |
 | `VPN_MIN_DOWNLOAD_RATE` | `300K` | Rotate after a sustained slow VPN transfer |
 | `VPN_SLOW_RATE_DURATION` | `120` | Seconds below the floor before rotate |
@@ -101,7 +104,7 @@ New environment variables (also in `.env.example` and `k8s/configmap.yaml`):
 | `VPN_GATE_CSV_URL` | VPN Gate API | Override the CSV URL |
 | `VPN_OBRATNO_URL` | VPN Obratno EN page | Override the HTML URL |
 
-UI: Home shows a Russian VPN status panel. `/vpn` lists endpoints with Test / Enable / Disable / Refresh. Diagnostics: `GET /api/vpn/status`, `GET /api/vpn/endpoints`, `POST /api/vpn/refresh`, `POST /api/vpn/test/{id}`. There is no extra auth layer; the existing LAN Ingress trust boundary applies. The gateway Service has no Ingress.
+UI: Home shows a Russian VPN status panel. `/vpn` lists the historical pool (live / stale / known-good / cooldown), variants, scores, and a manual-endpoint form. Diagnostics: `GET /api/vpn/status`, `GET /api/vpn/endpoints`, `POST /api/vpn/refresh`, `POST /api/vpn/test/{id}`, `POST /api/vpn/manual`. There is no extra auth layer; the existing LAN Ingress trust boundary applies. The gateway Service has no Ingress.
 
 ### Local checks
 

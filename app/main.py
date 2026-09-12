@@ -23,6 +23,7 @@ from .scheduler import (
 )
 from .vpn.discovery import maybe_refresh_vpn_catalogue
 from .vpn.manager import manager, mark_success
+from .vpn.manual import ManualEndpointError, upsert_manual_endpoint
 from .vpn.status import serialize_endpoint, vpn_dashboard_status
 from .vpn.util import format_ago, format_speed
 from .ytdlp import (
@@ -440,6 +441,31 @@ async def vpn_refresh_form():
     return RedirectResponse("/vpn", status_code=303)
 
 
+@app.post("/vpn/manual")
+def vpn_add_manual(
+    config: str = Form(...),
+    ip_address: str = Form(""),
+    hostname: str = Form(""),
+    priority: str = Form("50"),
+    db: Session = Depends(get_db),
+):
+    try:
+        parsed_priority = int(priority) if str(priority).strip() else None
+    except ValueError:
+        parsed_priority = None
+    try:
+        upsert_manual_endpoint(
+            db,
+            config_text=config,
+            ip_address=ip_address,
+            hostname=hostname,
+            priority=parsed_priority,
+        )
+    except ManualEndpointError as exc:
+        raise HTTPException(400, str(exc))
+    return RedirectResponse("/vpn", status_code=303)
+
+
 @app.post("/vpn/endpoints/{endpoint_id}/enable")
 def vpn_enable_endpoint(endpoint_id: int, db: Session = Depends(get_db)):
     row = db.get(VpnEndpoint, endpoint_id)
@@ -490,7 +516,34 @@ async def api_vpn_refresh():
         "found": getattr(stats, "found", 0),
         "added": getattr(stats, "added", 0),
         "updated": getattr(stats, "updated", 0),
+        "gate_current": getattr(stats, "gate_current", 0),
+        "obratno_current": getattr(stats, "obratno_current", 0),
+        "unique_current": getattr(stats, "unique_current", 0),
+        "historical_eligible": getattr(stats, "historical_eligible", 0),
+        "candidate_pool": getattr(stats, "candidate_pool", 0),
+        "inactive": getattr(stats, "inactive", 0),
     }
+
+
+@app.post("/api/vpn/manual")
+async def api_vpn_manual(request: Request, db: Session = Depends(get_db)):
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(400, "invalid JSON")
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "invalid payload")
+    try:
+        row = upsert_manual_endpoint(
+            db,
+            config_text=str(payload.get("config") or ""),
+            ip_address=str(payload.get("ip_address") or ""),
+            hostname=str(payload.get("hostname") or ""),
+            priority=payload.get("priority"),
+        )
+    except ManualEndpointError as exc:
+        raise HTTPException(400, str(exc))
+    return {"ok": True, "id": row.id, "ip_address": row.ip_address}
 
 
 @app.post("/api/vpn/test/{endpoint_id}")

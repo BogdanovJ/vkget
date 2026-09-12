@@ -12,7 +12,7 @@ from ..models import AppState, VpnEndpoint
 from .gate import DiscoveredEndpoint, apply_sanitized_config, fetch_vpngate_endpoints
 from .obratno import fetch_obratno_endpoints, fetch_ovpn_profile
 from .ovpn import OvpnError, sanitize_ovpn
-from .scoring import compute_score
+from .scoring import compute_score, is_manual
 from .util import merge_sources, now, preferred_source
 
 
@@ -28,6 +28,13 @@ class DiscoveryStats:
     inactive: int = 0
     gate_ok: bool = False
     obratno_ok: bool = False
+    gate_current: int = 0
+    obratno_current: int = 0
+    unique_current: int = 0
+    historical_eligible: int = 0
+    candidate_pool: int = 0
+    known_good: int = 0
+    cooldown: int = 0
 
 
 def _vpn_discovery_enabled() -> bool:
@@ -85,15 +92,35 @@ def merge_discovered(
         base.reported_uptime_ms = extra.reported_uptime_ms
 
     if extra.openvpn_udp_config:
-        if not base.openvpn_udp_config or (extra.udp_config_is_ip and not base.udp_config_is_ip):
+        if extra.udp_config_is_ip:
+            if base.openvpn_udp_config and not base.udp_config_is_ip:
+                base.openvpn_udp_ddns_config = base.openvpn_udp_ddns_config or base.openvpn_udp_config
+            base.openvpn_udp_config = extra.openvpn_udp_config
+            base.openvpn_udp_port = extra.openvpn_udp_port or base.openvpn_udp_port
+            base.udp_config_is_ip = True
+        elif not base.openvpn_udp_config:
             base.openvpn_udp_config = extra.openvpn_udp_config
             base.openvpn_udp_port = extra.openvpn_udp_port
-            base.udp_config_is_ip = extra.udp_config_is_ip
+            base.udp_config_is_ip = False
+    if extra.openvpn_udp_ddns_config:
+        base.openvpn_udp_ddns_config = extra.openvpn_udp_ddns_config
     if extra.openvpn_tcp_config:
-        if not base.openvpn_tcp_config or (extra.tcp_config_is_ip and not base.tcp_config_is_ip):
+        if extra.tcp_config_is_ip:
+            if base.openvpn_tcp_config and not base.tcp_config_is_ip:
+                base.openvpn_tcp_ddns_config = base.openvpn_tcp_ddns_config or base.openvpn_tcp_config
+            base.openvpn_tcp_config = extra.openvpn_tcp_config
+            base.openvpn_tcp_port = extra.openvpn_tcp_port or base.openvpn_tcp_port
+            base.tcp_config_is_ip = True
+        elif not base.openvpn_tcp_config:
             base.openvpn_tcp_config = extra.openvpn_tcp_config
             base.openvpn_tcp_port = extra.openvpn_tcp_port
-            base.tcp_config_is_ip = extra.tcp_config_is_ip
+            base.tcp_config_is_ip = False
+    if extra.openvpn_tcp_ddns_config:
+        base.openvpn_tcp_ddns_config = extra.openvpn_tcp_ddns_config
+    if extra.ovpn_urls:
+        for variant in extra.ovpn_urls:
+            if variant not in base.ovpn_urls:
+                base.ovpn_urls.append(variant)
 
     if extra.ovpn_url and (
         extra.ovpn_url_is_ip
@@ -110,7 +137,9 @@ def merge_discovered(
 def _apply_item_to_row(row: VpnEndpoint, item: DiscoveredEndpoint, seen_at: datetime) -> None:
     sources = merge_sources(row.sources, row.source, item.source, item.sources)
     row.sources = sources
-    if item.source == "vpnobratno" and (item.udp_config_is_ip or item.tcp_config_is_ip):
+    if is_manual(row):
+        row.source = "manual"
+    elif item.source == "vpnobratno" and (item.udp_config_is_ip or item.tcp_config_is_ip):
         row.source = "vpnobratno"
     else:
         row.source = preferred_source(sources)
@@ -126,20 +155,34 @@ def _apply_item_to_row(row: VpnEndpoint, item: DiscoveredEndpoint, seen_at: date
         row.reported_sessions = item.reported_sessions
     if item.reported_uptime_ms is not None:
         row.reported_uptime_ms = item.reported_uptime_ms
-    if item.openvpn_udp_config and (
-        not row.openvpn_udp_config or (item.udp_config_is_ip and not row.udp_config_is_ip)
-    ):
-        row.openvpn_udp_config = item.openvpn_udp_config
-        row.openvpn_udp_port = item.openvpn_udp_port
-        row.udp_config_is_ip = item.udp_config_is_ip
+    if item.openvpn_udp_config:
+        if item.udp_config_is_ip:
+            if row.openvpn_udp_config and not row.udp_config_is_ip:
+                row.openvpn_udp_ddns_config = row.openvpn_udp_ddns_config or row.openvpn_udp_config
+            row.openvpn_udp_config = item.openvpn_udp_config
+            row.openvpn_udp_port = item.openvpn_udp_port or row.openvpn_udp_port
+            row.udp_config_is_ip = True
+        elif not row.openvpn_udp_config:
+            row.openvpn_udp_config = item.openvpn_udp_config
+            row.openvpn_udp_port = item.openvpn_udp_port
+            row.udp_config_is_ip = False
+    if item.openvpn_udp_ddns_config:
+        row.openvpn_udp_ddns_config = item.openvpn_udp_ddns_config
     elif item.openvpn_udp_port and not row.openvpn_udp_port:
         row.openvpn_udp_port = item.openvpn_udp_port
-    if item.openvpn_tcp_config and (
-        not row.openvpn_tcp_config or (item.tcp_config_is_ip and not row.tcp_config_is_ip)
-    ):
-        row.openvpn_tcp_config = item.openvpn_tcp_config
-        row.openvpn_tcp_port = item.openvpn_tcp_port
-        row.tcp_config_is_ip = item.tcp_config_is_ip
+    if item.openvpn_tcp_config:
+        if item.tcp_config_is_ip:
+            if row.openvpn_tcp_config and not row.tcp_config_is_ip:
+                row.openvpn_tcp_ddns_config = row.openvpn_tcp_ddns_config or row.openvpn_tcp_config
+            row.openvpn_tcp_config = item.openvpn_tcp_config
+            row.openvpn_tcp_port = item.openvpn_tcp_port or row.openvpn_tcp_port
+            row.tcp_config_is_ip = True
+        elif not row.openvpn_tcp_config:
+            row.openvpn_tcp_config = item.openvpn_tcp_config
+            row.openvpn_tcp_port = item.openvpn_tcp_port
+            row.tcp_config_is_ip = False
+    if item.openvpn_tcp_ddns_config:
+        row.openvpn_tcp_ddns_config = item.openvpn_tcp_ddns_config
     elif item.openvpn_tcp_port and not row.openvpn_tcp_port:
         row.openvpn_tcp_port = item.openvpn_tcp_port
     row.last_seen_at = seen_at
@@ -163,6 +206,8 @@ def _row_from_item(item: DiscoveredEndpoint, seen_at: datetime) -> VpnEndpoint:
         openvpn_tcp_port=item.openvpn_tcp_port,
         openvpn_udp_config=item.openvpn_udp_config,
         openvpn_tcp_config=item.openvpn_tcp_config,
+        openvpn_udp_ddns_config=item.openvpn_udp_ddns_config,
+        openvpn_tcp_ddns_config=item.openvpn_tcp_ddns_config,
         udp_config_is_ip=item.udp_config_is_ip,
         tcp_config_is_ip=item.tcp_config_is_ip,
         first_seen_at=seen_at,
@@ -181,18 +226,40 @@ def _row_from_item(item: DiscoveredEndpoint, seen_at: datetime) -> VpnEndpoint:
     return row
 
 
-def _needs_ip_ovpn(item: DiscoveredEndpoint, existing: VpnEndpoint | None) -> bool:
-    if not item.ovpn_url:
-        return False
-    if item.openvpn_udp_config or item.openvpn_tcp_config:
-        return False
-    if existing is None:
-        return True
-    if item.ovpn_url_is_ip:
-        if item.ovpn_url_proto == "tcp":
-            return not existing.tcp_config_is_ip
-        return not existing.udp_config_is_ip
-    return not existing.has_usable_config()
+def _slot_filled(
+    item: DiscoveredEndpoint,
+    existing: VpnEndpoint | None,
+    proto: str,
+    is_ip: bool,
+) -> bool:
+    if proto == "tcp":
+        if is_ip:
+            return bool(item.tcp_config_is_ip or (existing and existing.tcp_config_is_ip))
+        return bool(
+            item.openvpn_tcp_ddns_config
+            or (item.openvpn_tcp_config and not item.tcp_config_is_ip)
+            or (existing and (existing.openvpn_tcp_ddns_config or (
+                existing.openvpn_tcp_config and not existing.tcp_config_is_ip
+            )))
+        )
+    if is_ip:
+        return bool(item.udp_config_is_ip or (existing and existing.udp_config_is_ip))
+    return bool(
+        item.openvpn_udp_ddns_config
+        or (item.openvpn_udp_config and not item.udp_config_is_ip)
+        or (existing and (existing.openvpn_udp_ddns_config or (
+            existing.openvpn_udp_config and not existing.udp_config_is_ip
+        )))
+    )
+
+
+def _obratno_urls(item: DiscoveredEndpoint) -> list[tuple[str, str, bool]]:
+    urls = list(item.ovpn_urls or [])
+    if item.ovpn_url:
+        fallback = (item.ovpn_url, item.ovpn_url_proto or "udp", bool(item.ovpn_url_is_ip))
+        if fallback not in urls:
+            urls.insert(0, fallback)
+    return urls
 
 
 async def _fill_obratno_configs(
@@ -204,19 +271,23 @@ async def _fill_obratno_configs(
         limit = 20
     fetched = 0
     for item in items:
-        if fetched >= max(limit, 0):
-            break
         existing = existing_by_ip.get(item.ip_address)
-        if not _needs_ip_ovpn(item, existing):
-            continue
-        try:
-            raw = await fetch_ovpn_profile(item.ovpn_url or "")
-            sanitized = sanitize_ovpn(raw)
-        except (OvpnError, httpx.HTTPError) as exc:
-            print(f"vkget: VPN discovery: Obratno ovpn skipped for {item.ip_address}: {exc}", flush=True)
-            continue
-        apply_sanitized_config(item, sanitized)
-        fetched += 1
+        for url, proto, is_ip in _obratno_urls(item):
+            if fetched >= max(limit, 0):
+                return
+            if not url or _slot_filled(item, existing, proto, is_ip):
+                continue
+            try:
+                raw = await fetch_ovpn_profile(url)
+                sanitized = sanitize_ovpn(raw)
+            except (OvpnError, httpx.HTTPError) as exc:
+                print(
+                    f"vkget: VPN discovery: Obratno ovpn skipped for {item.ip_address}: {exc}",
+                    flush=True,
+                )
+                continue
+            apply_sanitized_config(item, sanitized)
+            fetched += 1
 
 
 async def collect_discovered() -> tuple[dict[str, DiscoveredEndpoint], DiscoveryStats]:
@@ -224,7 +295,9 @@ async def collect_discovered() -> tuple[dict[str, DiscoveredEndpoint], Discovery
     discovered: dict[str, DiscoveredEndpoint] = {}
 
     try:
-        for item in await fetch_vpngate_endpoints():
+        gate_items = await fetch_vpngate_endpoints()
+        stats.gate_current = len(gate_items)
+        for item in gate_items:
             current = discovered.get(item.ip_address)
             discovered[item.ip_address] = merge_discovered(current, item) if current else item
         stats.gate_ok = True
@@ -233,6 +306,7 @@ async def collect_discovered() -> tuple[dict[str, DiscoveredEndpoint], Discovery
 
     try:
         obratno_items = await fetch_obratno_endpoints()
+        stats.obratno_current = len(obratno_items)
         stats.obratno_ok = True
         with SessionLocal() as db:
             existing = {
@@ -258,6 +332,7 @@ async def collect_discovered() -> tuple[dict[str, DiscoveredEndpoint], Discovery
         if item.openvpn_udp_config or item.openvpn_tcp_config
     }
     stats.found = len(usable)
+    stats.unique_current = len(usable)
     return usable, stats
 
 
@@ -295,6 +370,10 @@ def persist_discovered(
         for row in existing_rows:
             if row.ip_address in seen_ips:
                 continue
+            if is_manual(row):
+                row.score = compute_score(row, seen_at)
+                row.updated_at = seen_at
+                continue
             last_seen = row.last_seen_at or row.created_at or seen_at
             missing = seen_at - last_seen
             if missing > disable_after:
@@ -309,16 +388,31 @@ def persist_discovered(
 
         mark_discovery_ran(db, seen_at)
         db.commit()
+        _attach_pool_stats(stats, db, seen_at)
     return stats
+
+
+def _attach_pool_stats(stats: DiscoveryStats, db, current: datetime) -> None:
+    from .status import compute_pool_stats
+
+    pool = compute_pool_stats(db, current)
+    stats.historical_eligible = pool["historical_eligible"]
+    stats.candidate_pool = pool["candidate_pool"]
+    stats.known_good = pool["known_good"]
+    stats.cooldown = pool["cooldown"]
+    stats.inactive = pool["inactive"]
 
 
 async def refresh_vpn_catalogue() -> DiscoveryStats:
     discovered, stats = await collect_discovered()
     persist_discovered(discovered, stats)
-    print(
-        f"vkget: VPN discovery: found {stats.found} Russian endpoints",
-        flush=True,
-    )
+    print("vkget: VPN discovery:", flush=True)
+    print(f"  VPN Gate current RU: {stats.gate_current}", flush=True)
+    print(f"  VPN Obratno current RU: {stats.obratno_current}", flush=True)
+    print(f"  unique current: {stats.unique_current}", flush=True)
+    print(f"  historical eligible: {stats.historical_eligible}", flush=True)
+    print(f"  candidate pool: {stats.candidate_pool}", flush=True)
+    print(f"  inactive: {stats.inactive}", flush=True)
     if stats.added:
         print(f"vkget: VPN discovery: {stats.added} new endpoints added", flush=True)
     return stats

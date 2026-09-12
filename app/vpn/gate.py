@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
 
@@ -22,6 +22,8 @@ class DiscoveredEndpoint:
     openvpn_tcp_port: int | None = None
     openvpn_udp_config: str | None = None
     openvpn_tcp_config: str | None = None
+    openvpn_udp_ddns_config: str | None = None
+    openvpn_tcp_ddns_config: str | None = None
     udp_config_is_ip: bool = False
     tcp_config_is_ip: bool = False
     reported_speed_bps: int | None = None
@@ -31,6 +33,7 @@ class DiscoveredEndpoint:
     ovpn_url: str | None = None
     ovpn_url_is_ip: bool = False
     ovpn_url_proto: str | None = None
+    ovpn_urls: list = field(default_factory=list)
     sources: str = ""
 
     def __post_init__(self):
@@ -96,13 +99,33 @@ def apply_sanitized_config(item: DiscoveredEndpoint, sanitized) -> None:
     proto = sanitized.proto or "udp"
     uses_ip = sanitized.uses_ip_remote
     if proto == "tcp":
-        item.openvpn_tcp_config = sanitized.text
-        item.openvpn_tcp_port = sanitized.remote_port
-        item.tcp_config_is_ip = uses_ip
-    else:
+        if uses_ip:
+            if item.openvpn_tcp_config and not item.tcp_config_is_ip:
+                item.openvpn_tcp_ddns_config = item.openvpn_tcp_config
+            item.openvpn_tcp_config = sanitized.text
+            item.tcp_config_is_ip = True
+            item.openvpn_tcp_port = sanitized.remote_port or item.openvpn_tcp_port
+        else:
+            item.openvpn_tcp_ddns_config = sanitized.text
+            if not item.openvpn_tcp_config:
+                item.openvpn_tcp_config = sanitized.text
+                item.tcp_config_is_ip = False
+            if not item.openvpn_tcp_port:
+                item.openvpn_tcp_port = sanitized.remote_port
+        return
+    if uses_ip:
+        if item.openvpn_udp_config and not item.udp_config_is_ip:
+            item.openvpn_udp_ddns_config = item.openvpn_udp_config
         item.openvpn_udp_config = sanitized.text
+        item.udp_config_is_ip = True
+        item.openvpn_udp_port = sanitized.remote_port or item.openvpn_udp_port
+        return
+    item.openvpn_udp_ddns_config = sanitized.text
+    if not item.openvpn_udp_config:
+        item.openvpn_udp_config = sanitized.text
+        item.udp_config_is_ip = False
+    if not item.openvpn_udp_port:
         item.openvpn_udp_port = sanitized.remote_port
-        item.udp_config_is_ip = uses_ip
 
 
 async def fetch_vpngate_csv(url: str | None = None) -> str:
