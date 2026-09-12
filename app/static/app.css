@@ -285,6 +285,10 @@ footer{
   opacity:.7;
 }
 
+.vpn-status.wide{
+  grid-template-columns:repeat(5,1fr);
+}
+
 .table-wrap{overflow-x:auto}
 table.data{
   width:100%;

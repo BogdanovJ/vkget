@@ -127,6 +127,9 @@ def parse_obratno_html(html: str, base_url: str | None = None) -> list[Discovere
             if item.openvpn_udp_port is None:
                 item.openvpn_udp_port = 1194
             item.udp_config_is_ip = item.udp_config_is_ip or url_is_ip
+        variant = (absolute, proto or "udp", url_is_ip)
+        if variant not in item.ovpn_urls:
+            item.ovpn_urls.append(variant)
         if _better_ovpn_url(item, proto or "udp", url_is_ip):
             item.ovpn_url = absolute
             item.ovpn_url_proto = proto or "udp"

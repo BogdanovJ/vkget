@@ -59,8 +59,10 @@ class Settings:
         "VPN_PROXY_URL",
         "socks5://vkget-vpn-gateway.vkget.svc.cluster.local:1080",
     ).strip()
-    vpn_max_endpoint_attempts: int = env_int("VPN_MAX_ENDPOINT_ATTEMPTS", 3)
-    vpn_connect_timeout: int = env_int("VPN_CONNECT_TIMEOUT", 20)
+    vpn_max_endpoint_attempts: int = env_int("VPN_MAX_ENDPOINT_ATTEMPTS", 6)
+    vpn_connect_timeout: int = env_int("VPN_CONNECT_TIMEOUT", 8)
+    vpn_tcp_probe_timeout: int = env_int("VPN_TCP_PROBE_TIMEOUT", 2)
+    vpn_manual_priority: int = env_int("VPN_MANUAL_PRIORITY", 50)
     vpn_verify_timeout: int = env_int("VPN_VERIFY_TIMEOUT", 10)
     vpn_verify_cache_minutes: int = env_int("VPN_VERIFY_CACHE_MINUTES", 30)
     vpn_min_download_rate: str = os.getenv("VPN_MIN_DOWNLOAD_RATE", "300K")

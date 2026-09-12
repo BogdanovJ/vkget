@@ -39,7 +39,7 @@
     <div><em>STATUS</em><b>{{ vpn.status }}</b><small>MODE {{ vpn.mode|upper }}</small></div>
     <div><em>CURRENT ENDPOINT</em><b>{{ vpn.endpoint_ip or "—" }}</b><small>SOURCE {{ vpn.source }}</small></div>
     <div><em>REPORTED SPEED</em><b>{{ vpn.reported_speed }}</b><small>LATENCY {{ vpn.measured_latency }}</small></div>
-    <div><em>LAST DISCOVERY</em><b>{{ vpn.last_discovery }}</b><small>AVAILABLE {{ vpn.available_count }}</small></div>
+    <div><em>LAST DISCOVERY</em><b>{{ vpn.last_discovery }}</b><small>CANDIDATES {{ vpn.pool.candidate_pool if vpn.pool else vpn.available_count }} · LIVE {{ vpn.available_count }}</small></div>
   </div>
   <p class="muted"><a href="/vpn">OPEN ENDPOINT LIST</a></p>
 </section>

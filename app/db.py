@@ -33,6 +33,20 @@ def ensure_schema():
             conn.execute(
                 text("ALTER TABLE subscriptions ADD COLUMN last_scan_result TEXT NULL")
             )
+    if "vpn_endpoints" in inspector.get_table_names():
+        vpn_columns = {col["name"] for col in inspector.get_columns("vpn_endpoints")}
+        vpn_alters = [
+            ("openvpn_udp_ddns_config", "TEXT NULL"),
+            ("openvpn_tcp_ddns_config", "TEXT NULL"),
+            ("last_good_variant", "VARCHAR(20) NULL"),
+            ("last_failed_variant", "VARCHAR(20) NULL"),
+            ("priority", "INTEGER NOT NULL DEFAULT 0"),
+        ]
+        for name, ddl in vpn_alters:
+            if name in vpn_columns:
+                continue
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE vpn_endpoints ADD COLUMN {name} {ddl}"))
 
 def get_db():
     db = SessionLocal()
