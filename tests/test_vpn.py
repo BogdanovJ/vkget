@@ -32,7 +32,7 @@ from app.vpn.obratno import parse_obratno_html
 from app.vpn.ovpn import OvpnError, decode_vpngate_config, sanitize_ovpn
 from app.vpn.runtime import download_with_vpn_fallback, try_vpn_download
 from app.vpn.scoring import compute_score
-from app.vpn.status import compute_pool_stats
+from app.vpn.status import compute_pool_stats, vpn_dashboard_status
 from app.vpn.util import cooldown_for_failures as util_cooldown
 from app.vpn.util import normalize_public_ipv4
 
@@ -692,6 +692,17 @@ class HistoricalPoolTests(VpnCase):
         self.assertEqual(stats["known_good"], 1)
         self.assertEqual(stats["cooldown"], 1)
         self.assertEqual(stats["inactive"], 1)
+
+    def test_dashboard_status_includes_pool(self):
+        self.add_endpoint(ip_address="5.143.1.1", is_stale=False, score=20)
+        with self.Session() as db, patch(
+            "app.vpn.status.gateway_status_sync",
+            return_value={"connected": False, "available": False},
+        ):
+            data = vpn_dashboard_status(db)
+        self.assertIn("pool", data)
+        self.assertEqual(data["pool"]["current_live"], 1)
+        self.assertEqual(data["pool"]["candidate_pool"], 1)
 
 
 class VariantTests(VpnCase):

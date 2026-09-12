@@ -5,6 +5,7 @@ from datetime import datetime
 import httpx
 from sqlalchemy import func, select
 
+from ..config import settings
 from ..models import AppState, Video, VpnEndpoint
 from .discovery import DISCOVERY_STATE_KEY
 from .fallback import vpn_mode
