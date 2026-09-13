@@ -399,5 +399,45 @@ class GatewayTests(unittest.TestCase):
         self.assertIn("WireGuard failed", body["detail"])
 
 
+class GatewayStatusCopyTests(unittest.TestCase):
+    def test_dns_failure_is_not_running(self):
+        from app.vpn.status import explain_gateway_failure
+
+        label, detail = explain_gateway_failure("[Errno -2] Name or service not known")
+        self.assertEqual(label, "NOT RUNNING")
+        self.assertNotIn("Errno", detail)
+        self.assertIn("not deployed", detail)
+
+    def test_connection_refused_is_not_running(self):
+        from app.vpn.status import explain_gateway_failure
+
+        label, detail = explain_gateway_failure("Connection refused")
+        self.assertEqual(label, "NOT RUNNING")
+
+    def test_empty_url_is_not_configured(self):
+        from app.vpn.status import explain_gateway_failure, gateway_status_sync
+
+        label, detail = explain_gateway_failure("unconfigured")
+        self.assertEqual(label, "NOT CONFIGURED")
+        with patch("app.vpn.status.gateway_base_url", return_value=""):
+            status = gateway_status_sync()
+        self.assertEqual(status["label"], "NOT CONFIGURED")
+        self.assertFalse(status["available"])
+
+    def test_probe_hides_raw_exception(self):
+        from app.vpn.status import gateway_status_sync
+
+        with patch("app.vpn.status.gateway_base_url", return_value="http://vkget-vpn-gateway:8081"), patch(
+            "app.vpn.status.httpx.Client"
+        ) as client_cls:
+            client_cls.return_value.__enter__.return_value.get.side_effect = OSError(
+                -2, "Name or service not known"
+            )
+            status = gateway_status_sync()
+        self.assertEqual(status["label"], "NOT RUNNING")
+        self.assertNotIn("Errno", status["detail"])
+        self.assertNotIn("Name or service not known", status["detail"])
+
+
 if __name__ == "__main__":
     unittest.main()

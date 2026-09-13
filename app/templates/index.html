@@ -59,7 +59,7 @@
   <div class="vpn-status">
     <div><em>ROUTING</em><b>{{ vpn.status }}</b><small>{{ "ACTIVE" if vpn.enabled else "DOWNLOADS USE NORMAL INTERNET" }}</small></div>
     <div><em>PROFILE</em><b>{{ vpn.profile_name or "—" }}</b><small>{{ vpn.profile_type or "NONE SELECTED" }}</small></div>
-    <div><em>GATEWAY</em><b>{{ "ONLINE" if vpn.gateway_available else "OFFLINE" }}</b><small>TUNNEL {{ "CONNECTED" if vpn.connected else "DISCONNECTED" }}</small></div>
+    <div><em>GATEWAY</em><b>{{ vpn.gateway_label }}</b><small>TUNNEL {{ "CONNECTED" if vpn.connected else "DISCONNECTED" }}</small></div>
     <div><em>EXIT</em><b>{{ vpn.exit_ip or "—" }}</b><small>{{ vpn.exit_country or "FALLBACK " + ("ON" if vpn.fallback_to_direct else "OFF") }}</small></div>
   </div>
   <p class="muted"><a href="/vpn">MANAGE VPN</a></p>
