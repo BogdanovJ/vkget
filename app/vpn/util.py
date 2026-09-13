@@ -70,9 +70,14 @@ def parse_rate_bps(value: str | None) -> int | None:
     return int(number * multiplier)
 
 
-def format_ago(value: datetime | None, current: datetime | None = None) -> str:
-    if value is None:
+def format_ago(value: datetime | str | None, current: datetime | None = None) -> str:
+    if value is None or value == "":
         return "NEVER"
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return "NEVER"
     delta = (current or now()) - value
     secs = int(delta.total_seconds())
     if secs < 0:

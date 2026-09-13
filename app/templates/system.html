@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}SYSTEM · VKGET{% endblock %}
+{% block content %}
+<section class="hero">
+  <div>
+    <div class="eyebrow">CONTAINER SELF-CHECK</div>
+    <h1>SYSTEM</h1>
+  </div>
+  <span class="badge vpn-flag {{ 'on' if system.ok else 'off' }}">{{ "OK" if system.ok else "ATTENTION" }}</span>
+</section>
+
+<section class="panel vpn-routing">
+  <p>
+    Checks binaries and mounts inside the vkget container.
+    yt-dlp updates require a new image; they are not applied in place.
+  </p>
+  <div class="meta">
+    <span>LAST CHECK {{ system.checked_at|ago if system.checked_at else "NEVER" }}</span>
+    {% if system.latest_ytdlp %}
+    <span>LATEST YT-DLP {{ system.latest_ytdlp }}</span>
+    {% endif %}
+    {% if system.latest_error %}
+    <span>LATEST LOOKUP {{ system.latest_error }}</span>
+    {% endif %}
+  </div>
+  <form method="post" action="/system/check">
+    <button type="submit">CHECK NOW</button>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>COMPONENTS</h2>
+  {% for item in system.components %}
+  <div class="profile-card">
+    <div>
+      <strong>{{ item.name }}</strong>
+      <small>{{ item.current }}{% if item.latest %} · latest {{ item.latest }}{% endif %}</small>
+      <small{% if not item.ok %} class="error"{% endif %}>{{ item.detail }}</small>
+    </div>
+    <em class="status">{{ item.status }}</em>
+  </div>
+  {% endfor %}
+</section>
+{% endblock %}
