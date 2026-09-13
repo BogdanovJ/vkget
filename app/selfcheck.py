@@ -78,7 +78,9 @@ def _binary_check(check_id: str, name: str, args: list[str], missing: str) -> Co
         return ComponentCheck(check_id, name, False, "MISSING", "—", missing)
     code, output = _run(args)
     first = output.splitlines()[0] if output else ""
-    version = format_version(parse_version(first)) or first[:60] or "present"
+    dated = format_version(parse_version(first))
+    generic = re.search(r"version\s+(\S+)", first, re.I)
+    version = dated or (generic.group(1) if generic else "") or first[:40] or "present"
     if code != 0:
         return ComponentCheck(
             check_id,
@@ -281,7 +283,7 @@ def run_selfcheck(db, *, refresh_latest: bool = False) -> dict:
         "latest_ytdlp": latest or "",
         "latest_checked_at": cache.get("latest_checked_at") or current.isoformat(),
         "latest_error": latest_error,
-        "items": [asdict(item) for item in items],
+        "components": [asdict(item) for item in items],
         "ok": all(item.ok for item in items),
         "attention": any(not item.ok for item in items),
     }
@@ -301,7 +303,7 @@ def load_selfcheck(db, *, refresh: bool = False, fetch_if_needed: bool = False) 
         "latest_ytdlp": latest or "",
         "latest_checked_at": cache.get("latest_checked_at") or "",
         "latest_error": cache.get("latest_error") or "",
-        "items": [asdict(item) for item in items],
+        "components": [asdict(item) for item in items],
         "ok": all(item.ok for item in items),
         "attention": any(not item.ok for item in items),
     }
@@ -309,11 +311,11 @@ def load_selfcheck(db, *, refresh: bool = False, fetch_if_needed: bool = False) 
 
 def selfcheck_summary(report: dict) -> dict:
     wanted = ("ytdlp", "ffmpeg", "storage", "cookies")
-    by_id = {item["id"]: item for item in report.get("items") or []}
+    by_id = {item["id"]: item for item in report.get("components") or []}
     return {
         "ok": bool(report.get("ok")),
         "attention": bool(report.get("attention")),
         "status": "ATTENTION" if report.get("attention") else "OK",
-        "items": [by_id[key] for key in wanted if key in by_id],
+        "components": [by_id[key] for key in wanted if key in by_id],
         "checked_at": report.get("checked_at") or "",
     }

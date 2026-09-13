@@ -41,7 +41,7 @@
       <b>{{ system.status }}</b>
       <small>{{ "ALL INTERNAL CHECKS PASSED" if system.ok else "ONE OR MORE COMPONENTS NEED ATTENTION" }}</small>
     </div>
-    {% for item in system.items %}
+    {% for item in system.components %}
     <div>
       <em>{{ item.name }}</em>
       <b>{{ item.status }}</b>

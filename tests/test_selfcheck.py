@@ -118,7 +118,7 @@ class SelfCheckTests(unittest.TestCase):
             "app.selfcheck.fetch_latest_ytdlp", side_effect=AssertionError("github")
         ), patch("app.selfcheck.collect_checks", return_value=[]):
             report = load_selfcheck(db)
-        self.assertIn("items", report)
+        self.assertIn("components", report)
         self.assertFalse(report["attention"])
 
     def test_check_now_fetches_latest(self):
@@ -133,4 +133,4 @@ class SelfCheckTests(unittest.TestCase):
         self.assertTrue(report["ok"])
         summary = selfcheck_summary(report)
         self.assertEqual(summary["status"], "OK")
-        self.assertEqual(summary["items"][0]["id"], "ytdlp")
+        self.assertEqual(summary["components"][0]["id"], "ytdlp")
