@@ -265,6 +265,60 @@ def build_download_output(
     return Path(settings.download_root) / dir_name / f"{stem}.%(ext)s"
 
 
+_NO_DATA_BLOCKS = "did not get any data blocks"
+_TINY_PART_BYTES = 64 * 1024
+_EMPTY_MEDIA_SUFFIXES = {".mp4", ".mkv", ".webm", ".m4a", ".mp3"}
+
+
+def download_output_prefix(output: str) -> str:
+    name = Path(output).name
+    if name.endswith(".%(ext)s"):
+        return name[: -len(".%(ext)s")]
+    return Path(output).stem
+
+
+def iter_download_artifacts(output: str):
+    parent = Path(output).parent
+    prefix = download_output_prefix(output)
+    if not prefix or not parent.is_dir():
+        return
+    for path in parent.iterdir():
+        if path.is_file() and path.name.startswith(prefix):
+            yield path
+
+
+def is_partial_download(path: Path) -> bool:
+    name = path.name.lower()
+    return name.endswith(".part") or name.endswith(".ytdl") or ".part." in name
+
+
+def remove_stale_download_parts(output: str, *, force: bool = False) -> list[str]:
+    """Delete leftover yt-dlp temps that make --continue resume a dead download."""
+    removed: list[str] = []
+    for path in iter_download_artifacts(output):
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        drop = False
+        if is_partial_download(path) and (force or size < _TINY_PART_BYTES):
+            drop = True
+        elif size == 0 and path.suffix.lower() in _EMPTY_MEDIA_SUFFIXES:
+            drop = True
+        if not drop:
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        removed.append(str(path))
+    return removed
+
+
+def looks_like_no_data_blocks(log: str | None) -> bool:
+    return _NO_DATA_BLOCKS in (log or "").lower()
+
+
 def title_from_entry(entry: dict | None, external_id: str = "") -> str:
     if not isinstance(entry, dict):
         return ""
@@ -1082,6 +1136,13 @@ async def download_video(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output = str(output_path)
     fmt = download_format(settings.max_height)
+    stale = remove_stale_download_parts(output)
+    if stale:
+        print(
+            "vkget: removed leftover partial download before retry: "
+            + ", ".join(Path(item).name for item in stale),
+            flush=True,
+        )
 
     last_rc = 1
     last_path = None
@@ -1096,15 +1157,35 @@ async def download_video(
             return 1, final_path, f"{log}\nTV compatible encode failed: {exc}".strip()
         return rc, tv_path, log
 
-    for candidate in download_url_candidates(url):
+    async def _attempt(candidate: str, extra_cookies=None, user_agent=None):
         once_kwargs = {"proxy": proxy} if proxy else {}
+        rc, final_path, log = await _download_once(
+            candidate,
+            output,
+            fmt,
+            extra_cookies=extra_cookies,
+            user_agent=user_agent,
+            **once_kwargs,
+        )
+        if rc == 0 or not looks_like_no_data_blocks(log):
+            return rc, final_path, log
+        print(
+            "vkget: yt-dlp wrote no data blocks, discarding partial and retrying once",
+            flush=True,
+        )
+        remove_stale_download_parts(output, force=True)
+        return await _download_once(
+            candidate,
+            output,
+            fmt,
+            extra_cookies=extra_cookies,
+            user_agent=user_agent,
+            **once_kwargs,
+        )
+
+    for candidate in download_url_candidates(url):
         try:
-            rc, final_path, log = await _download_once(
-                candidate,
-                output,
-                fmt,
-                **once_kwargs,
-            )
+            rc, final_path, log = await _attempt(candidate)
         except asyncio.TimeoutError:
             last_rc = 1
             last_path = None
@@ -1120,13 +1201,10 @@ async def download_video(
 
         try:
             cookies, user_agent = await fetch_flaresolverr_cookies(candidate)
-            rc, final_path, log = await _download_once(
+            rc, final_path, log = await _attempt(
                 candidate,
-                output,
-                fmt,
                 extra_cookies=cookies,
                 user_agent=user_agent,
-                **once_kwargs,
             )
         except asyncio.TimeoutError:
             last_log = f"{last_log}\n{candidate}: timed out after FlareSolverr".strip()
