@@ -76,7 +76,7 @@
     </span>
 
     <span class="actions">
-      {% if v.status.startswith("IGNORED") %}
+      {% if v.status.startswith("IGNORED") or v.status == "PAUSED" %}
       <form method="post" action="/videos/{{ v.id }}/download">
         <button class="small">DOWNLOAD</button>
       </form>
