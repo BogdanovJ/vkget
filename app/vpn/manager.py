@@ -12,6 +12,7 @@ from .geo import GeoResult, lookup_egress
 from .ovpn import OvpnError, sanitize_ovpn
 from .profiles import mark_profile_failure, mark_profile_success
 from .settings import gateway_base_url, proxy_url
+from .status import explain_gateway_failure
 from .wireguard import WireGuardError, sanitize_wireguard
 
 
@@ -50,7 +51,8 @@ class VPNManager:
     async def check_connection(self) -> GatewayStatus:
         base = gateway_base_url()
         if not base:
-            return GatewayStatus(detail="gateway URL is not configured")
+            _label, detail = explain_gateway_failure("unconfigured")
+            return GatewayStatus(detail=detail)
         try:
             timeout = httpx.Timeout(2.0, connect=1.0)
             async with httpx.AsyncClient(timeout=timeout) as client:
@@ -58,7 +60,8 @@ class VPNManager:
                 response.raise_for_status()
                 data = response.json()
         except Exception as exc:
-            return GatewayStatus(detail=str(exc))
+            _label, detail = explain_gateway_failure(exc)
+            return GatewayStatus(detail=detail)
         return GatewayStatus(
             connected=bool(data.get("connected")),
             available=True,

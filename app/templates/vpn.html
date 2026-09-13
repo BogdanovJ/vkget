@@ -21,12 +21,9 @@
   {% if not vpn.enabled %}
   <p>Downloads currently use the normal internet connection.</p>
   <div class="meta">
-    <span>GATEWAY {{ "ONLINE" if vpn.gateway_available else "OFFLINE" }}</span>
+    <span>GATEWAY {{ vpn.gateway_label }}</span>
     <span>TUNNEL DISCONNECTED</span>
   </div>
-  {% if vpn.gateway_available == false and vpn.gateway_detail %}
-  <p class="muted">{{ vpn.gateway_detail }}</p>
-  {% endif %}
   <form method="post" action="/vpn/enable">
     <button type="submit">ENABLE VPN</button>
   </form>
@@ -45,7 +42,10 @@
     <p class="muted">Add an OpenVPN or WireGuard profile to use VPN routing.</p>
     {% endif %}
     <div class="meta">
-      <span>GATEWAY {{ "ONLINE" if vpn.gateway_available else "OFFLINE" }}</span>
+      <span>GATEWAY {{ vpn.gateway_label }}</span>
+      {% if not vpn.gateway_available and vpn.gateway_detail %}
+      <span>{{ vpn.gateway_detail }}</span>
+      {% endif %}
       <span>FALLBACK TO DIRECT {{ "ON" if vpn.fallback_to_direct else "OFF" }}</span>
     </div>
     <div class="actions">
