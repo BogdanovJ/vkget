@@ -6,6 +6,8 @@ import tempfile
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from pathlib import Path
+
 from app.ytdlp import (
     _netscape_cookie_line,
     build_download_output,
@@ -20,8 +22,10 @@ from app.ytdlp import (
     iter_library_media,
     label_from_url,
     looks_like_bot_protection,
+    looks_like_no_data_blocks,
     mirror_url,
     normalize_vk_url,
+    remove_stale_download_parts,
     reset_library_tv_failures,
     scan_url_candidates,
     to_vk_com,
@@ -479,6 +483,111 @@ class DownloadOutputWireTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("2024-01-15 - Lecture 4 [-1_2].%(ext)s", outputs[0])
         self.assertNotIn("/VK Uploader/", outputs[0])
         self.assertTrue(path.endswith("2024-01-15 - Lecture 4 [-1_2].mp4"))
+
+
+class StalePartialDownloadTests(unittest.TestCase):
+    def test_removes_tiny_part_but_keeps_large_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = str(Path(tmp) / "Talk [-1_2].%(ext)s")
+            tiny = Path(tmp) / "Talk [-1_2].mp4.part"
+            large = Path(tmp) / "Talk [-1_2].webm.part"
+            empty = Path(tmp) / "Talk [-1_2].mp4"
+            keep = Path(tmp) / "Talk [-1_2].mp4.ok"
+            tiny.write_bytes(b"x" * 100)
+            large.write_bytes(b"x" * (200 * 1024))
+            empty.write_bytes(b"")
+            keep.write_bytes(b"done")
+
+            removed = remove_stale_download_parts(output)
+            self.assertIn(str(tiny), removed)
+            self.assertIn(str(empty), removed)
+            self.assertFalse(tiny.exists())
+            self.assertFalse(empty.exists())
+            self.assertTrue(large.exists())
+            self.assertTrue(keep.exists())
+
+            forced = remove_stale_download_parts(output, force=True)
+            self.assertIn(str(large), forced)
+            self.assertFalse(large.exists())
+            self.assertTrue(keep.exists())
+
+    def test_detects_data_blocks_error(self):
+        self.assertTrue(
+            looks_like_no_data_blocks(
+                "ERROR: Did not get any data blocks ERROR: Did not get any data blocks"
+            )
+        )
+        self.assertFalse(looks_like_no_data_blocks("HTTP Error 403: Forbidden"))
+
+
+class NoDataBlocksRetryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_retries_once_after_discarding_partial(self):
+        calls: list[str] = []
+
+        async def fake_once(url, output, fmt, extra_cookies=None, user_agent=None, proxy=None):
+            calls.append(url)
+            if len(calls) == 1:
+                return 1, None, "ERROR: Did not get any data blocks"
+            return 0, output.replace("%(ext)s", "mp4"), "ok"
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "app.ytdlp.settings"
+        ) as fake_settings, patch(
+            "app.ytdlp._download_once", side_effect=fake_once
+        ), patch(
+            "app.ytdlp.ensure_tv_compatible",
+            new=AsyncMock(side_effect=lambda path: path),
+        ):
+            fake_settings.flaresolverr_url = ""
+            fake_settings.download_root = tmp
+            fake_settings.max_height = 720
+            fake_settings.download_rate = "500K"
+            fake_settings.cookie_file = "/missing"
+            from app.ytdlp import download_video
+
+            rc, path, log = await download_video(
+                "https://vk.com/video-1_2",
+                "channel",
+                title="Talk",
+                video_id="-1_2",
+                upload_date="20240115",
+            )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, ["https://vk.com/video-1_2", "https://vk.com/video-1_2"])
+        self.assertTrue(path.endswith("Talk [-1_2].mp4"))
+
+    async def test_does_not_retry_unrelated_errors(self):
+        calls: list[str] = []
+
+        async def fake_once(url, output, fmt, extra_cookies=None, user_agent=None, proxy=None):
+            calls.append(url)
+            return 1, None, "HTTP Error 403: Forbidden"
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "app.ytdlp.settings"
+        ) as fake_settings, patch(
+            "app.ytdlp._download_once", side_effect=fake_once
+        ):
+            fake_settings.flaresolverr_url = ""
+            fake_settings.download_root = tmp
+            fake_settings.max_height = 720
+            fake_settings.download_rate = "500K"
+            fake_settings.cookie_file = "/missing"
+            from app.ytdlp import download_video
+
+            rc, path, log = await download_video(
+                "https://vk.com/video-1_2",
+                "channel",
+                title="Talk",
+                video_id="-1_2",
+            )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(
+            calls,
+            ["https://vk.com/video-1_2", "https://vkvideo.ru/video-1_2"],
+        )
 
 
 class TvCompatibleTests(unittest.TestCase):
