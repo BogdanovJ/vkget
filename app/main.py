@@ -26,6 +26,7 @@ from .queue import (
     retry_now,
     set_queue_paused,
 )
+from .selfcheck import load_selfcheck, run_selfcheck, selfcheck_summary
 from .scheduler import (
     recover_interrupted_downloads,
     scan_subscription,
@@ -174,6 +175,7 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
             "next_download": next_download,
             "max_height": settings.max_height,
             "vpn": vpn_dashboard_status(db, current),
+            "system": selfcheck_summary(load_selfcheck(db)),
         },
     )
 
@@ -502,6 +504,27 @@ def queue_delete_item(video_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404)
     delete_from_queue(db, video)
     return RedirectResponse("/queue", status_code=303)
+
+
+@app.get("/system", response_class=HTMLResponse)
+def system_page(request: Request, db: Session = Depends(get_db)):
+    report = load_selfcheck(db, fetch_if_needed=True)
+    return templates.TemplateResponse(
+        request=request,
+        name="system.html",
+        context={"system": report},
+    )
+
+
+@app.post("/system/check")
+def system_check_now(db: Session = Depends(get_db)):
+    run_selfcheck(db, refresh_latest=True)
+    return RedirectResponse("/system", status_code=303)
+
+
+@app.get("/api/system")
+def api_system(db: Session = Depends(get_db)):
+    return load_selfcheck(db)
 
 def _form_bool(value: str | None) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}

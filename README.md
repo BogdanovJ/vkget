@@ -105,6 +105,19 @@ docker run --rm --cap-add=NET_ADMIN --device /dev/net/tun \
 # then: curl --proxy socks5://127.0.0.1:1080 https://ifconfig.co/json
 ```
 
+## System check
+
+The `/system` page inspects components inside the vkget container:
+
+- yt-dlp (installed version vs the latest GitHub release)
+- ffmpeg / ffprobe
+- cookies file
+- download storage
+- database
+- Python runtime
+
+It does not upgrade binaries in the running pod. To update yt-dlp, change `YTDLP_VERSION` in the Dockerfile, push to `main`, and roll the `vkget` image. `/healthz` stays a cheap liveness probe and does not call GitHub.
+
 ## Deploy
 
 1. Push to `main`. GitHub Actions builds `linux/arm64` and publishes `ghcr.io/bogdanovj/vkget:latest`.

@@ -32,6 +32,27 @@
   </div>
 </div>
 
+{% if system %}
+<section class="panel">
+  <h2>SYSTEM</h2>
+  <div class="vpn-status">
+    <div>
+      <em>STATUS</em>
+      <b>{{ system.status }}</b>
+      <small>{{ "ALL INTERNAL CHECKS PASSED" if system.ok else "ONE OR MORE COMPONENTS NEED ATTENTION" }}</small>
+    </div>
+    {% for item in system.items %}
+    <div>
+      <em>{{ item.name }}</em>
+      <b>{{ item.status }}</b>
+      <small>{{ item.current }}{% if item.latest %} → {{ item.latest }}{% endif %}</small>
+    </div>
+    {% endfor %}
+  </div>
+  <p class="muted"><a href="/system">OPEN SYSTEM CHECK</a></p>
+</section>
+{% endif %}
+
 {% if vpn %}
 <section class="panel">
   <h2>VPN</h2>
