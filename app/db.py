@@ -33,6 +33,16 @@ def ensure_schema():
             conn.execute(
                 text("ALTER TABLE subscriptions ADD COLUMN last_scan_result TEXT NULL")
             )
+    if "videos" in inspector.get_table_names():
+        video_columns = {col["name"] for col in inspector.get_columns("videos")}
+        if "queue_rank" not in video_columns:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE videos "
+                        "ADD COLUMN queue_rank INTEGER NOT NULL DEFAULT 0"
+                    )
+                )
     # vpn_endpoints is left in place if it already exists. New installs use vpn_profiles.
 
 def get_db():

@@ -14,6 +14,18 @@ from sqlalchemy.orm import Session
 from .config import settings
 from .db import ensure_schema, get_db
 from .models import AppState, Subscription, Video, VpnProfile
+from .queue import (
+    delete_from_queue,
+    is_queue_paused,
+    list_queue,
+    move_queue_item,
+    next_queue_rank,
+    pause_item,
+    queue_order,
+    resume_item,
+    retry_now,
+    set_queue_paused,
+)
 from .scheduler import (
     recover_interrupted_downloads,
     scan_subscription,
@@ -85,7 +97,7 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
         "subscriptions": db.scalar(select(func.count()).select_from(Subscription)) or 0,
         "queued": db.scalar(
             select(func.count()).select_from(Video).where(
-                Video.status.in_(["QUEUED", "FAILED_TEMPORARY"])
+                Video.status.in_(["QUEUED", "FAILED_TEMPORARY", "PAUSED"])
             )
         ) or 0,
         "downloading": db.scalar(
@@ -122,11 +134,13 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
     next_download_video = db.scalars(
         select(Video)
         .where(Video.status.in_(["QUEUED", "FAILED_TEMPORARY"]))
-        .order_by(Video.next_attempt_at.asc())
+        .order_by(*queue_order())
         .limit(1)
     ).first()
 
-    if counts["downloading"]:
+    if is_queue_paused(db):
+        next_download = {"when": "PAUSED", "title": None}
+    elif counts["downloading"]:
         next_download = {"when": "IN PROGRESS", "title": None}
     elif not next_download_video:
         next_download = {"when": "NONE", "title": None}
@@ -263,6 +277,7 @@ async def add_one_off(
         upload_date=data.get("upload_date"),
         status="QUEUED",
         next_attempt_at=datetime.now(),
+        queue_rank=next_queue_rank(db),
     )
 
     db.add(video)
@@ -363,6 +378,7 @@ async def force_download(
     video.status = "QUEUED"
     video.ignore_reason = None
     video.next_attempt_at = datetime.now()
+    video.queue_rank = next_queue_rank(db)
     webpage_url = video.webpage_url
     current_title = video.title
     current_channel = video.channel
@@ -417,19 +433,75 @@ def ignore_video(
 
 @app.get("/queue", response_class=HTMLResponse)
 def queue(request: Request, db: Session = Depends(get_db)):
-    videos = db.scalars(
-        select(Video)
-        .where(Video.status.in_(["QUEUED", "DOWNLOADING", "FAILED_TEMPORARY"]))
-        .order_by(Video.next_attempt_at.asc())
-        .limit(200)
-    ).all()
-
-    # /queue
+    videos = list_queue(db)
     return templates.TemplateResponse(
         request=request,
         name="queue.html",
-        context={"videos": videos},
+        context={
+            "videos": videos,
+            "queue_paused": is_queue_paused(db),
+        },
     )
+
+
+@app.post("/queue/pause")
+def queue_pause(db: Session = Depends(get_db)):
+    set_queue_paused(db, True)
+    return RedirectResponse("/queue", status_code=303)
+
+
+@app.post("/queue/resume")
+def queue_resume(db: Session = Depends(get_db)):
+    set_queue_paused(db, False)
+    return RedirectResponse("/queue", status_code=303)
+
+
+@app.post("/queue/videos/{video_id}/up")
+def queue_move_up(video_id: int, db: Session = Depends(get_db)):
+    move_queue_item(db, video_id, -1)
+    return RedirectResponse("/queue", status_code=303)
+
+
+@app.post("/queue/videos/{video_id}/down")
+def queue_move_down(video_id: int, db: Session = Depends(get_db)):
+    move_queue_item(db, video_id, 1)
+    return RedirectResponse("/queue", status_code=303)
+
+
+@app.post("/queue/videos/{video_id}/retry")
+def queue_retry_now(video_id: int, db: Session = Depends(get_db)):
+    video = db.get(Video, video_id)
+    if not video:
+        raise HTTPException(404)
+    retry_now(db, video)
+    return RedirectResponse("/queue", status_code=303)
+
+
+@app.post("/queue/videos/{video_id}/pause")
+def queue_pause_item(video_id: int, db: Session = Depends(get_db)):
+    video = db.get(Video, video_id)
+    if not video:
+        raise HTTPException(404)
+    pause_item(db, video)
+    return RedirectResponse("/queue", status_code=303)
+
+
+@app.post("/queue/videos/{video_id}/resume")
+def queue_resume_item(video_id: int, db: Session = Depends(get_db)):
+    video = db.get(Video, video_id)
+    if not video:
+        raise HTTPException(404)
+    resume_item(db, video)
+    return RedirectResponse("/queue", status_code=303)
+
+
+@app.post("/queue/videos/{video_id}/delete")
+def queue_delete_item(video_id: int, db: Session = Depends(get_db)):
+    video = db.get(Video, video_id)
+    if not video:
+        raise HTTPException(404)
+    delete_from_queue(db, video)
+    return RedirectResponse("/queue", status_code=303)
 
 def _form_bool(value: str | None) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}

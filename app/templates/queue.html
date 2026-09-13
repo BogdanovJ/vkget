@@ -1,15 +1,31 @@
 {% extends "base.html" %}
+{% block title %}QUEUE · VKGET{% endblock %}
 {% block content %}
 <section class="hero">
   <div>
     <div class="eyebrow">WORK LIST</div>
     <h1>QUEUE</h1>
   </div>
+  <span class="badge vpn-flag {{ 'off' if queue_paused else 'on' }}">{{ "PAUSED" if queue_paused else "LIVE" }}</span>
+</section>
+
+<section class="panel vpn-routing">
+  {% if queue_paused %}
+  <p>Downloads are paused. A job that already started will finish; nothing new will start.</p>
+  <form method="post" action="/queue/resume">
+    <button type="submit">RESUME QUEUE</button>
+  </form>
+  {% else %}
+  <p>The scheduler takes the next due item, one at a time.</p>
+  <form method="post" action="/queue/pause">
+    <button class="danger" type="submit">PAUSE QUEUE</button>
+  </form>
+  {% endif %}
 </section>
 
 <section class="panel">
 {% for v in videos %}
-  <div class="row big">
+  <div class="row big catalogue">
     <span>
       <strong>{{ v.display_title() }}</strong>
       <small>
@@ -19,7 +35,36 @@
       <small class="error">{{ v.last_error[-180:] }}</small>
       {% endif %}
     </span>
-    <em class="status">{{ v.status }}</em>
+    <span class="actions">
+      <em class="status">{{ v.status }}</em>
+      {% if v.status != "DOWNLOADING" %}
+        {% if not loop.first %}
+        <form method="post" action="/queue/videos/{{ v.id }}/up">
+          <button class="small" type="submit">UP</button>
+        </form>
+        {% endif %}
+        {% if not loop.last %}
+        <form method="post" action="/queue/videos/{{ v.id }}/down">
+          <button class="small" type="submit">DOWN</button>
+        </form>
+        {% endif %}
+        <form method="post" action="/queue/videos/{{ v.id }}/retry">
+          <button class="small" type="submit">RETRY NOW</button>
+        </form>
+        {% if v.status == "PAUSED" %}
+        <form method="post" action="/queue/videos/{{ v.id }}/resume">
+          <button class="small" type="submit">RESUME</button>
+        </form>
+        {% else %}
+        <form method="post" action="/queue/videos/{{ v.id }}/pause">
+          <button class="small" type="submit">PAUSE</button>
+        </form>
+        {% endif %}
+        <form method="post" action="/queue/videos/{{ v.id }}/delete" onsubmit="return confirm('Remove this from the queue? The catalogue row stays.');">
+          <button class="small danger" type="submit">DELETE</button>
+        </form>
+      {% endif %}
+    </span>
   </div>
 {% else %}
   <p class="muted">QUEUE EMPTY.</p>

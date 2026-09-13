@@ -12,6 +12,7 @@ from .db import SessionLocal
 from .filters import rejection_reason
 from .models import AppState, Subscription, Video
 from .notifier import format_video_notice, notify
+from .queue import RUNNABLE_STATUSES, is_queue_paused, next_queue_rank, queue_order
 from .vpn.runtime import download_with_vpn
 from .ytdlp import (
     PLACEHOLDER_TITLES,
@@ -347,7 +348,11 @@ async def scan_subscription(subscription_id: int, initial: bool = False):
         sub = db.get(Subscription, subscription_id)
         if not sub:
             return
+        rank = next_queue_rank(db)
         for row in new_videos:
+            if row.get("status") == "QUEUED":
+                row["queue_rank"] = rank
+                rank += 1
             db.add(Video(**row))
         sub.last_scan_at = scan_at
         sub.last_error = None
@@ -428,13 +433,16 @@ async def run_one_download() -> bool:
         if cooldown and cooldown > now():
             return False
 
+        if is_queue_paused(db):
+            return False
+
         job = db.scalar(
             select(Video)
             .where(
-                Video.status.in_(["QUEUED", "FAILED_TEMPORARY"]),
+                Video.status.in_(RUNNABLE_STATUSES),
                 Video.next_attempt_at <= now(),
             )
-            .order_by(Video.next_attempt_at.asc())
+            .order_by(*queue_order())
             .limit(1)
         )
 
@@ -478,7 +486,7 @@ async def run_one_download() -> bool:
 
     with SessionLocal() as db:
         job = db.get(Video, video_id)
-        if not job or job.status not in {"QUEUED", "FAILED_TEMPORARY"}:
+        if not job or job.status not in RUNNABLE_STATUSES:
             return False
 
         _apply_resolved_metadata(job, meta, folder_fallback=sub_label)
