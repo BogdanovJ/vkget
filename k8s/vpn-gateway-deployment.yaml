@@ -15,6 +15,9 @@ spec:
       labels:
         app: vkget-vpn-gateway
     spec:
+      nodeSelector:
+        kubernetes.io/hostname: k3s01
+        kubernetes.io/arch: arm64
       containers:
         - name: vpn-gateway
           image: ghcr.io/YOUR_USER/vkget-vpn-gateway:latest
