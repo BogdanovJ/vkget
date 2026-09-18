@@ -757,20 +757,6 @@ TV_MAX_LEVEL = 41
 TV_MAX_WIDTH = 1280
 TV_VIDEO_TAGS = frozenset({"avc1"})
 TV_PROGRESSIVE = frozenset({"", "progressive", "unknown"})
-TV_MEDIA_SUFFIXES = frozenset({".mp4", ".webm", ".mkv", ".mov", ".m4v"})
-TV_SKIP_NAME_SUFFIXES = (".part", ".ytdl", ".compat.mp4")
-
-_failed_library_paths: set[str] = set()
-
-
-def reset_library_tv_failures() -> None:
-    _failed_library_paths.clear()
-
-
-def mark_library_tv_failure(path: str) -> None:
-    _failed_library_paths.add(path)
-
-
 def _is_attached_pic(stream: dict) -> bool:
     disposition = stream.get("disposition") or {}
     return bool(disposition.get("attached_pic"))
@@ -971,31 +957,6 @@ def is_tv_ready(probe: dict, path: str = "", max_height: int | None = None) -> b
     return True
 
 
-def is_library_media_path(path: Path) -> bool:
-    name = path.name
-    if name.startswith("."):
-        return False
-    lowered = name.lower()
-    if any(lowered.endswith(suffix) for suffix in TV_SKIP_NAME_SUFFIXES):
-        return False
-    return path.suffix.lower() in TV_MEDIA_SUFFIXES
-
-
-def iter_library_media(root: str | Path) -> list[Path]:
-    base = Path(root)
-    if not base.is_dir():
-        return []
-    found: list[Path] = []
-    for dirpath, dirnames, filenames in os.walk(base):
-        dirnames[:] = [name for name in dirnames if not name.startswith(".")]
-        for name in filenames:
-            candidate = Path(dirpath) / name
-            if is_library_media_path(candidate):
-                found.append(candidate)
-    found.sort()
-    return found
-
-
 async def probe_media(path: str) -> dict:
     rc, out, err = await _run(
         [
@@ -1046,27 +1007,6 @@ async def ensure_tv_compatible(path: str, *, force_remux: bool = True) -> str:
         except OSError:
             pass
     return str(final)
-
-
-async def next_library_tv_rewrite(root: str | Path | None = None) -> str | None:
-    """Return the next existing download that is not yet TV-safe."""
-    base = root if root is not None else settings.download_root
-    for path in iter_library_media(base):
-        key = str(path)
-        if key in _failed_library_paths:
-            continue
-        try:
-            probe = await probe_media(key)
-        except Exception:
-            _failed_library_paths.add(key)
-            continue
-        if is_tv_ready(probe, key):
-            continue
-        if not tv_codec_plan(probe)["has_video"]:
-            _failed_library_paths.add(key)
-            continue
-        return key
-    return None
 
 
 async def _download_once(
@@ -1152,7 +1092,7 @@ async def download_video(
         if rc != 0:
             return rc, final_path, log
         try:
-            tv_path = await ensure_tv_compatible(final_path or "")
+            tv_path = await ensure_tv_compatible(final_path or "", force_remux=False)
         except Exception as exc:
             return 1, final_path, f"{log}\nTV compatible encode failed: {exc}".strip()
         return rc, tv_path, log

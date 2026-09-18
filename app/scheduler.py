@@ -19,14 +19,11 @@ from .ytdlp import (
     PLACEHOLDER_TITLES,
     download_folder_name,
     download_video,
-    ensure_tv_compatible,
     format_upload_date,
     inspect_playlist_flat,
     is_usable_channel,
     is_usable_video_title,
     label_from_url,
-    mark_library_tv_failure,
-    next_library_tv_rewrite,
     resolve_video_metadata,
     title_from_entry,
 )
@@ -660,35 +657,10 @@ async def run_one_download() -> bool:
     return True
 
 
-async def run_one_tv_reencode() -> bool:
-    """Convert one existing download that is not yet Samsung-safe."""
-    if not storage_ok():
-        return False
-    path = await next_library_tv_rewrite()
-    if not path:
-        return False
-    try:
-        new_path = await ensure_tv_compatible(path, force_remux=False)
-    except Exception as exc:
-        mark_library_tv_failure(path)
-        print(f"vkget: TV reencode failed for {path}: {exc}", flush=True)
-        return True
-    if new_path != path:
-        with SessionLocal() as db:
-            videos = db.scalars(select(Video).where(Video.local_path == path)).all()
-            for video in videos:
-                video.local_path = new_path
-            db.commit()
-        print(f"vkget: TV reencoded {path} -> {new_path}", flush=True)
-    else:
-        print(f"vkget: TV remuxed {path}", flush=True)
-    return True
-
 
 async def scheduler_loop():
     delay = SCHEDULER_SLEEP_SECONDS
     while True:
-        reencoded = False
         try:
             current = now()
             with SessionLocal() as db:
@@ -708,8 +680,7 @@ async def scheduler_loop():
                 await scan_subscription(sub_id)
 
             await resolve_placeholder_queued_titles()
-            if not await run_one_download():
-                reencoded = await run_one_tv_reencode()
+            await run_one_download()
             delay = SCHEDULER_SLEEP_SECONDS
 
         except DB_ERRORS as exc:
@@ -722,6 +693,4 @@ async def scheduler_loop():
             print("scheduler error:", exc, flush=True)
             delay = SCHEDULER_SLEEP_SECONDS
 
-        if reencoded:
-            continue
         await asyncio.sleep(SCHEDULER_SLEEP_SECONDS)
