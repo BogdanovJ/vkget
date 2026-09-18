@@ -10,14 +10,18 @@
 </section>
 
 <section class="panel vpn-routing">
+  <p>Checks binaries and mounts inside this container.</p>
+  {% if system.ytdlp_update %}
   <p>
-    Checks binaries and mounts inside the vkget container.
-    yt-dlp updates require a new image; they are not applied in place.
+    A newer yt-dlp is on GitHub. Change <code>YTDLP_VERSION</code> in the Dockerfile,
+    push to <code>main</code>, then restart the vkget deploy.
+    In-pod upgrades are lost on the next rollout.
   </p>
+  {% endif %}
   <div class="meta">
     <span>LAST CHECK {{ system.checked_at|ago if system.checked_at else "NEVER" }}</span>
     {% if system.latest_ytdlp %}
-    <span>LATEST YT-DLP {{ system.latest_ytdlp }}</span>
+    <span>GITHUB YT-DLP {{ system.latest_ytdlp }}</span>
     {% endif %}
     {% if system.latest_error %}
     <span>LATEST LOOKUP {{ system.latest_error }}</span>
@@ -34,8 +38,14 @@
   <div class="profile-card">
     <div>
       <strong>{{ item.name }}</strong>
-      <small>{{ item.current }}{% if item.latest %} · latest {{ item.latest }}{% endif %}</small>
+      {% if item.current and item.current != "—" %}
+      <small>{{ item.current }}{% if item.latest and item.latest != item.current %} · latest {{ item.latest }}{% endif %}</small>
+      {% elif item.latest %}
+      <small>latest {{ item.latest }}</small>
+      {% endif %}
+      {% if item.detail and item.detail != item.current %}
       <small{% if not item.ok %} class="error"{% endif %}>{{ item.detail }}</small>
+      {% endif %}
     </div>
     <em class="status">{{ item.status }}</em>
   </div>

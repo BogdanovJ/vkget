@@ -118,7 +118,21 @@ The `/system` page inspects components inside the vkget container:
 - database
 - Python runtime
 
-It does not upgrade binaries in the running pod. To update yt-dlp, change `YTDLP_VERSION` in the Dockerfile, push to `main`, and roll the `vkget` image. `/healthz` stays a cheap liveness probe and does not call GitHub.
+It does not upgrade binaries in the running pod.
+
+**YT-DLP status**
+
+- `OK` — the installed (or image) version matches GitHub, or GitHub could not be reached
+- `UPDATE` — GitHub has a newer release than this image
+- `TIMEOUT` / `ERROR` — the live `yt-dlp --version` probe failed. That is not an update. On a small ARM node the zipapp can exceed the probe window; vkget then uses `YTDLP_VERSION` baked into the image.
+
+To update yt-dlp:
+
+1. Set `YTDLP_VERSION` in the Dockerfile to the GitHub release tag (currently `2026.08.19`).
+2. Push to `main` so Actions rebuilds `ghcr.io/bogdanovj/vkget:latest`.
+3. Restart the workload: `kubectl -n vkget rollout restart deploy/vkget`.
+
+`/healthz` stays a cheap liveness probe and does not call GitHub.
 
 ## Deploy
 

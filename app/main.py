@@ -185,7 +185,7 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
             "next_download": next_download,
             "max_height": settings.max_height,
             "vpn": vpn_dashboard_status(db, current),
-            "system": selfcheck_summary(load_selfcheck(db)),
+            "system": selfcheck_summary(load_selfcheck(db, live=False)),
         },
     )
 

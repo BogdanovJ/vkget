@@ -1,6 +1,7 @@
 FROM python:3.12-slim
 
 ARG YTDLP_VERSION=2026.08.19
+ENV YTDLP_VERSION=${YTDLP_VERSION}
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates \

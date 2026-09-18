@@ -326,6 +326,11 @@ footer{
   opacity:.7;
   margin-top:4px;
 }
+.panel code{
+  font: inherit;
+  border: 1px solid rgba(232,230,217,.35);
+  padding: 1px 5px;
+}
 
 .choice-row{
   display:flex;
