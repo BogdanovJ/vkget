@@ -21,6 +21,7 @@ from .scheduler import SHARE_SENTINEL, storage_ok
 CACHE_KEY = "system_check_cache"
 CACHE_HOURS = 6
 YTDLP_BIN = os.getenv("YTDLP_BIN", "/usr/local/bin/yt-dlp")
+IMAGE_YTDLP_VERSION = os.getenv("YTDLP_VERSION", "")
 YTDLP_LATEST_URL = os.getenv(
     "YTDLP_LATEST_URL",
     "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest",
@@ -56,7 +57,7 @@ def format_version(parts: tuple[int, int, int] | None) -> str:
     return f"{parts[0]}.{parts[1]:02d}.{parts[2]:02d}"
 
 
-def _run(args: list[str], timeout: float = 4) -> tuple[int, str]:
+def _run(args: list[str], timeout: float = 8) -> tuple[int, str]:
     try:
         result = subprocess.run(
             args,
@@ -73,10 +74,31 @@ def _run(args: list[str], timeout: float = 4) -> tuple[int, str]:
     return result.returncode, output
 
 
-def _binary_check(check_id: str, name: str, args: list[str], missing: str) -> ComponentCheck:
+def _binary_name(args: list[str]) -> str:
+    return Path(args[0]).name if args else "binary"
+
+
+def _binary_check(
+    check_id: str,
+    name: str,
+    args: list[str],
+    missing: str,
+    *,
+    timeout: float = 8,
+) -> ComponentCheck:
     if not shutil.which(args[0]) and not Path(args[0]).is_file():
         return ComponentCheck(check_id, name, False, "MISSING", "—", missing)
-    code, output = _run(args)
+    code, output = _run(args, timeout=timeout)
+    binary = _binary_name(args)
+    if code == 124:
+        return ComponentCheck(
+            check_id,
+            name,
+            False,
+            "TIMEOUT",
+            "—",
+            f"{binary} did not finish in time",
+        )
     first = output.splitlines()[0] if output else ""
     dated = format_version(parse_version(first))
     generic = re.search(r"version\s+(\S+)", first, re.I)
@@ -87,10 +109,32 @@ def _binary_check(check_id: str, name: str, args: list[str], missing: str) -> Co
             name,
             False,
             "ERROR",
-            version,
-            output[-200:] or f"{args[0]} exited {code}",
+            version if version not in {"timed out", "present"} else "—",
+            (output[-200:] if output and output != "timed out" else f"{binary} exited {code}"),
         )
     return ComponentCheck(check_id, name, True, "OK", version, first[:120])
+
+
+def _compare_ytdlp(current: str, latest: str | None, *, detail: str = "") -> ComponentCheck:
+    newest = format_version(parse_version(latest))
+    installed = parse_version(current)
+    latest_parts = parse_version(newest)
+    if installed and latest_parts and installed < latest_parts:
+        return ComponentCheck(
+            "ytdlp",
+            "YT-DLP",
+            False,
+            "UPDATE",
+            format_version(installed),
+            "Newer yt-dlp is available. Change YTDLP_VERSION in the Dockerfile, "
+            "push to main, then restart the vkget deploy. An in-pod upgrade is "
+            "lost on the next rollout.",
+            newest,
+        )
+    note = detail or (
+        f"Installed {current}; latest {newest}" if newest else f"Installed {current}"
+    )
+    return ComponentCheck("ytdlp", "YT-DLP", True, "OK", current, note, newest or "")
 
 
 def _ytdlp_check(latest: str | None) -> ComponentCheck:
@@ -99,25 +143,25 @@ def _ytdlp_check(latest: str | None) -> ComponentCheck:
         "YT-DLP",
         [YTDLP_BIN, "--version"],
         "yt-dlp binary is not installed in this container",
+        timeout=20,
     )
-    if not check.ok:
+    if check.status == "MISSING":
         return check
-    installed = parse_version(check.current)
-    newest = parse_version(latest)
-    if installed and newest and installed < newest:
-        return ComponentCheck(
-            "ytdlp",
-            "YT-DLP",
-            False,
-            "UPDATE",
-            format_version(installed),
-            "Newer yt-dlp is available. Rebuild the vkget image to update; "
-            "an in-pod upgrade is lost on the next rollout.",
-            format_version(newest),
+
+    image_ver = format_version(parse_version(IMAGE_YTDLP_VERSION))
+    if check.ok:
+        return _compare_ytdlp(check.current, latest)
+
+    if image_ver:
+        note = (
+            f"Installed {image_ver} from the image"
+            + (f"; latest {format_version(parse_version(latest))}" if latest else "")
+            + f". Live probe: {check.detail}."
         )
-    if newest:
-        check.latest = format_version(newest)
-        check.detail = f"Installed {check.current}; latest {check.latest}"
+        return _compare_ytdlp(image_ver, latest, detail=note)
+
+    if latest:
+        check.latest = format_version(parse_version(latest)) or ""
     return check
 
 
@@ -263,6 +307,38 @@ def platform_python() -> str:
     return sys.version.split()[0]
 
 
+def _ytdlp_update(items: list) -> bool:
+    for item in items:
+        if isinstance(item, dict):
+            ident, status = item.get("id"), item.get("status")
+        else:
+            ident, status = item.id, item.status
+        if ident == "ytdlp" and status == "UPDATE":
+            return True
+    return False
+
+
+def _payload(
+    items: list[ComponentCheck],
+    *,
+    current: datetime,
+    latest: str | None,
+    latest_error: str,
+    latest_checked_at: str,
+) -> dict:
+    components = [asdict(item) for item in items]
+    return {
+        "checked_at": current.isoformat(),
+        "latest_ytdlp": latest or "",
+        "latest_checked_at": latest_checked_at,
+        "latest_error": latest_error,
+        "components": components,
+        "ok": all(item.ok for item in items),
+        "attention": any(not item.ok for item in items),
+        "ytdlp_update": _ytdlp_update(items),
+    }
+
+
 def run_selfcheck(db, *, refresh_latest: bool = False) -> dict:
     cache = _read_cache(db)
     current = now()
@@ -281,35 +357,52 @@ def run_selfcheck(db, *, refresh_latest: bool = False) -> dict:
             cache["latest_error"] = latest_error
             cache["latest_checked_at"] = current.isoformat()
     items = collect_checks(latest)
-    payload = {
-        "checked_at": current.isoformat(),
-        "latest_ytdlp": latest or "",
-        "latest_checked_at": cache.get("latest_checked_at") or current.isoformat(),
-        "latest_error": latest_error,
-        "components": [asdict(item) for item in items],
-        "ok": all(item.ok for item in items),
-        "attention": any(not item.ok for item in items),
-    }
+    payload = _payload(
+        items,
+        current=current,
+        latest=latest,
+        latest_error=latest_error,
+        latest_checked_at=str(cache.get("latest_checked_at") or current.isoformat()),
+    )
     cache.update(payload)
     _write_cache(db, cache)
     return payload
 
 
-def load_selfcheck(db, *, refresh: bool = False, fetch_if_needed: bool = False) -> dict:
+def load_selfcheck(
+    db,
+    *,
+    refresh: bool = False,
+    fetch_if_needed: bool = False,
+    live: bool = True,
+) -> dict:
     cache = _read_cache(db)
     if refresh or (fetch_if_needed and not cache.get("latest_checked_at")):
         return run_selfcheck(db, refresh_latest=True)
+    if not live and cache.get("components"):
+        components = cache.get("components") or []
+        return {
+            "checked_at": cache.get("checked_at") or now().isoformat(),
+            "latest_ytdlp": cache.get("latest_ytdlp") or "",
+            "latest_checked_at": cache.get("latest_checked_at") or "",
+            "latest_error": cache.get("latest_error") or "",
+            "components": components,
+            "ok": bool(cache.get("ok")),
+            "attention": bool(cache.get("attention")),
+            "ytdlp_update": bool(cache.get("ytdlp_update")) or _ytdlp_update(components),
+        }
     latest = str(cache.get("latest_ytdlp") or "") or None
     items = collect_checks(latest)
-    return {
-        "checked_at": now().isoformat(),
-        "latest_ytdlp": latest or "",
-        "latest_checked_at": cache.get("latest_checked_at") or "",
-        "latest_error": cache.get("latest_error") or "",
-        "components": [asdict(item) for item in items],
-        "ok": all(item.ok for item in items),
-        "attention": any(not item.ok for item in items),
-    }
+    payload = _payload(
+        items,
+        current=now(),
+        latest=latest,
+        latest_error=str(cache.get("latest_error") or ""),
+        latest_checked_at=str(cache.get("latest_checked_at") or ""),
+    )
+    cache.update(payload)
+    _write_cache(db, cache)
+    return payload
 
 
 def selfcheck_summary(report: dict) -> dict:

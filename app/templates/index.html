@@ -45,7 +45,7 @@
     <div>
       <em>{{ item.name }}</em>
       <b>{{ item.status }}</b>
-      <small>{{ item.current }}{% if item.latest %} → {{ item.latest }}{% endif %}</small>
+      <small>{% if item.current and item.current != "—" %}{{ item.current }}{% endif %}{% if item.latest and item.latest != item.current %}{% if item.current and item.current != "—" %} → {% endif %}{{ item.latest }}{% endif %}</small>
     </div>
     {% endfor %}
   </div>
