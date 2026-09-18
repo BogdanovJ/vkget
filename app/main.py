@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .config import settings
-from .db import ensure_schema, get_db
+from .db import ensure_schema, get_db, wait_for_database
 from .models import AppState, Subscription, Video, VpnProfile
 from .queue import (
     delete_from_queue,
@@ -28,6 +28,7 @@ from .queue import (
 )
 from .selfcheck import load_selfcheck, run_selfcheck, selfcheck_summary
 from .scheduler import (
+    prepare_download_share,
     recover_interrupted_downloads,
     scan_subscription,
     scheduler_loop,
@@ -88,9 +89,18 @@ templates.env.filters["ago"] = format_ago
 
 @app.on_event("startup")
 async def startup():
+    prepare_download_share()
+    asyncio.create_task(_run_background())
+
+
+async def _run_background():
+    await wait_for_database(_init_database)
+    await scheduler_loop()
+
+
+def _init_database():
     ensure_schema()
     recover_interrupted_downloads()
-    asyncio.create_task(scheduler_loop())
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request, db: Session = Depends(get_db)):
