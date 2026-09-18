@@ -15,11 +15,10 @@ spec:
       labels:
         app: vkget
     spec:
-      # IMPORTANT:
-      # Pin this workload to a node where /mnt/downloads is definitely mounted.
-      # Example:
+      # Pin this workload to the node that actually has /mnt/downloads.
+      # Label that node: kubectl label node <name> vkget-storage=true
       nodeSelector:
-      vkget-storage: "true"
+        vkget-storage: "true"
 
       containers:
         - name: vkget

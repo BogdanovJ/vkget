@@ -140,6 +140,10 @@ To update yt-dlp:
 2. Restart the workload yourself so it pulls the new image, e.g. `kubectl -n vkget rollout restart deploy/vkget`.
 3. Create the MariaDB database/user with `sql/bootstrap.sql`.
 4. Create SOPS secrets from the examples in `k8s/`.
-5. Set the storage node selector in `k8s/deployment.yaml`.
+5. Label the node that has `/mnt/downloads` (the k3s agent that should run vkget):
+
+   `kubectl label node <name> vkget-storage=true`
+
+   `k8s/deployment.yaml` pins the pod with `nodeSelector: vkget-storage: "true"`. If that agent is down, vkget stays Pending instead of writing into an empty `/downloads` on another node.
 6. Change the image reference.
 7. Apply with Flux/Kustomize.
