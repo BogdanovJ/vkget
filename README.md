@@ -22,6 +22,8 @@ Features:
 
 Kubernetes mounts the node's existing `/mnt/downloads` to `/downloads`.
 
+vkget treats `/downloads` as ready when it is writable and marked as the real share. On a Kubernetes hostPath/PVC mount it writes `.vkget-share` itself on first check. If that marker is missing and `/downloads` is not a mount (the empty directory from the image), downloads stay paused so files are not written into ephemeral container storage.
+
 Subscription downloads go in one folder named after the subscription:
 
 `/downloads/{subscription}/{YYYY-MM-DD} - {title} [{id}].mp4`

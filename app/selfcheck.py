@@ -16,7 +16,7 @@ from sqlalchemy import text
 from .config import settings
 from .db import engine
 from .models import AppState
-from .scheduler import storage_ok
+from .scheduler import SHARE_SENTINEL, storage_ok
 
 CACHE_KEY = "system_check_cache"
 CACHE_HOURS = 6
@@ -158,13 +158,16 @@ def _storage_check() -> ComponentCheck:
     root = settings.download_root
     if storage_ok():
         return ComponentCheck("storage", "STORAGE", True, "OK", root, "writable and sentinel present")
-    sentinel = os.path.join(root, ".vkget-share")
+    sentinel = os.path.join(root, SHARE_SENTINEL)
     if not os.path.isdir(root):
         detail = "download root is missing"
     elif not os.access(root, os.W_OK):
         detail = "download root is not writable"
     elif not os.path.isfile(sentinel):
-        detail = "missing .vkget-share sentinel"
+        detail = (
+            "missing .vkget-share sentinel; "
+            f"touch {sentinel} on the host share or remount {root}"
+        )
     else:
         detail = "storage probe failed"
     return ComponentCheck("storage", "STORAGE", False, "ERROR", root, detail)

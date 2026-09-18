@@ -6,9 +6,10 @@ import random
 from datetime import datetime, timedelta
 
 from sqlalchemy import select
+from sqlalchemy.exc import InterfaceError, OperationalError
 
 from .config import settings
-from .db import SessionLocal
+from .db import SessionLocal, reset_pool
 from .filters import rejection_reason
 from .models import AppState, Subscription, Video
 from .notifier import format_video_notice, notify
@@ -93,22 +94,62 @@ def get_global_cooldown(db):
     except ValueError:
         return None
 
+SHARE_SENTINEL = ".vkget-share"
+DB_ERRORS = (OperationalError, InterfaceError)
+SCHEDULER_SLEEP_SECONDS = 30
+DB_BACKOFF_MAX_SECONDS = 300
+
+
+def is_mount_point(path: str) -> bool:
+    """True when path is a real mount, including same-fs bind mounts."""
+    real = os.path.realpath(path)
+    try:
+        with open("/proc/self/mountinfo", encoding="utf-8") as fh:
+            for line in fh:
+                prefix = line.split(" - ", 1)[0]
+                parts = prefix.split()
+                if len(parts) < 5:
+                    continue
+                mount_point = parts[4].replace("\\040", " ")
+                if mount_point == real:
+                    return True
+    except OSError:
+        pass
+    return os.path.ismount(real)
+
+
+def prepare_download_share(root: str | None = None) -> bool:
+    """Create .vkget-share when /downloads is a mounted, writable share."""
+    root = root or settings.download_root
+    if not os.path.isdir(root) or not os.access(root, os.W_OK):
+        return False
+
+    sentinel = os.path.join(root, SHARE_SENTINEL)
+    if os.path.isfile(sentinel):
+        return True
+    if not is_mount_point(root):
+        return False
+
+    try:
+        with open(sentinel, "w", encoding="utf-8") as fh:
+            fh.write("ok\n")
+        return True
+    except OSError:
+        return False
+
+
 def storage_ok():
     root = settings.download_root
 
     if not os.path.isdir(root) or not os.access(root, os.W_OK):
         return False
+    if not prepare_download_share(root):
+        return False
 
-    sentinel = os.path.join(root, ".vkget-share")
-    if not os.path.isfile(sentinel):
-        return False
-    if not os.access(root, os.W_OK):
-        return False
-    
     probe = os.path.join(root, ".vkget-write-test")
 
     try:
-        with open(probe, "w") as f:
+        with open(probe, "w", encoding="utf-8") as f:
             f.write("ok")
         os.unlink(probe)
         return True
@@ -645,6 +686,7 @@ async def run_one_tv_reencode() -> bool:
 
 
 async def scheduler_loop():
+    delay = SCHEDULER_SLEEP_SECONDS
     while True:
         reencoded = False
         try:
@@ -668,10 +710,18 @@ async def scheduler_loop():
             await resolve_placeholder_queued_titles()
             if not await run_one_download():
                 reencoded = await run_one_tv_reencode()
+            delay = SCHEDULER_SLEEP_SECONDS
 
+        except DB_ERRORS as exc:
+            print("scheduler database error:", exc, flush=True)
+            reset_pool()
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, DB_BACKOFF_MAX_SECONDS)
+            continue
         except Exception as exc:
             print("scheduler error:", exc, flush=True)
+            delay = SCHEDULER_SLEEP_SECONDS
 
         if reencoded:
             continue
-        await asyncio.sleep(30)
+        await asyncio.sleep(SCHEDULER_SLEEP_SECONDS)
