@@ -20,7 +20,7 @@ spec:
         kubernetes.io/arch: arm64
       containers:
         - name: vpn-gateway
-          image: ghcr.io/YOUR_USER/vkget-vpn-gateway:latest
+          image: ghcr.io/bogdanovj/vkget-vpn-gateway
           imagePullPolicy: Always
           ports:
             - name: control
