@@ -7,6 +7,7 @@ from sqlalchemy import func, select
 from .models import AppState, Video
 
 PAUSED_KEY = "queue_paused"
+FLASH_KEY = "queue_flash"
 ACTIVE_STATUSES = ("QUEUED", "DOWNLOADING", "FAILED_TEMPORARY", "PAUSED")
 RUNNABLE_STATUSES = ("QUEUED", "FAILED_TEMPORARY")
 
@@ -36,6 +37,26 @@ def set_queue_paused(db, paused: bool) -> None:
     else:
         db.add(AppState(key=PAUSED_KEY, value=value))
     db.commit()
+
+
+def set_queue_flash(db, message: str) -> None:
+    row = db.get(AppState, FLASH_KEY)
+    value = (message or "").strip()
+    if row:
+        row.value = value
+    else:
+        db.add(AppState(key=FLASH_KEY, value=value))
+    db.commit()
+
+
+def pop_queue_flash(db) -> str:
+    row = db.get(AppState, FLASH_KEY)
+    if not row or not row.value:
+        return ""
+    message = row.value
+    row.value = ""
+    db.commit()
+    return message
 
 
 def next_queue_rank(db) -> int:

@@ -37,6 +37,56 @@ def jitter_minutes(low: int, high: int):
 def jitter_hours(low: int, high: int):
     return timedelta(minutes=random.randint(low * 60, high * 60))
 
+
+def entry_recency_key(entry) -> int | None:
+    """Sort key for newest-first. Timestamps beat YYYYMMDD dates."""
+    if not entry:
+        return None
+    for field in ("timestamp", "release_timestamp"):
+        raw = entry.get(field)
+        if raw in (None, ""):
+            continue
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            continue
+    for field in ("upload_date", "release_date"):
+        digits = "".join(ch for ch in str(entry.get(field) or "") if ch.isdigit())[:8]
+        if len(digits) == 8:
+            try:
+                return int(digits)
+            except ValueError:
+                continue
+    return None
+
+
+def newest_initial_ids(entries, limit: int) -> set[str]:
+    """LAST N = N newest videos. Dated lists use dates; else index 0 is newest."""
+    if limit <= 0:
+        return set()
+    usable = [entry for entry in entries if entry and entry.get("id")]
+    if not usable:
+        return set()
+    if any(entry_recency_key(entry) is not None for entry in usable):
+        ordered = sorted(
+            usable,
+            key=lambda entry: entry_recency_key(entry) or 0,
+            reverse=True,
+        )
+        return {str(entry.get("id")) for entry in ordered[:limit]}
+    return {str(entry.get("id")) for entry in usable[:limit]}
+
+
+def queued_newest_first(rows: list[dict]) -> list[dict]:
+    """Lowest queue rank should be the newest queued video."""
+    if any(row.get("_recency") is not None for row in rows):
+        return sorted(
+            rows,
+            key=lambda row: (row.get("_recency") or 0, -(row.get("_index") or 0)),
+            reverse=True,
+        )
+    return sorted(rows, key=lambda row: row.get("_index") or 0)
+
 def classify_error(error: str):
     e = (error or "").lower()
 
@@ -253,9 +303,7 @@ async def scan_subscription(subscription_id: int, initial: bool = False):
 
         initial_allowed = set()
         if is_initial and sub.initial_last_n > 0:
-            for entry in entries[-sub.initial_last_n:]:
-                if entry and entry.get("id"):
-                    initial_allowed.add(str(entry["id"]))
+            initial_allowed = newest_initial_ids(entries, sub.initial_last_n)
 
         skipped_incomplete = 0
         skipped_existing = 0
@@ -349,6 +397,8 @@ async def scan_subscription(subscription_id: int, initial: bool = False):
                         if status == "QUEUED"
                         else None
                     ),
+                    "_recency": entry_recency_key(entry),
+                    "_index": len(new_videos),
                 }
             )
 
@@ -387,10 +437,15 @@ async def scan_subscription(subscription_id: int, initial: bool = False):
         if not sub:
             return
         rank = next_queue_rank(db)
+        queued_rows = queued_newest_first(
+            [row for row in new_videos if row.get("status") == "QUEUED"]
+        )
+        for row in queued_rows:
+            row["queue_rank"] = rank
+            rank += 1
         for row in new_videos:
-            if row.get("status") == "QUEUED":
-                row["queue_rank"] = rank
-                rank += 1
+            row.pop("_recency", None)
+            row.pop("_index", None)
             db.add(Video(**row))
         sub.last_scan_at = scan_at
         sub.last_error = None
