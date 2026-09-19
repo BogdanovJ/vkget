@@ -102,7 +102,7 @@ class FakeQueuedVideo:
 
 
 class QueueTitleDisplayTests(unittest.TestCase):
-    def test_url_bit_title_displays_untitled_not_id(self):
+    def test_url_bit_title_displays_channel_not_id(self):
         video = Video(
             title="-211437014_7",
             external_id="-211437014_7",
@@ -110,7 +110,7 @@ class QueueTitleDisplayTests(unittest.TestCase):
             channel="Algebra",
             status="QUEUED",
         )
-        self.assertEqual(video.display_title(), "Untitled")
+        self.assertEqual(video.display_title(), "Algebra")
 
     def test_real_title_is_shown(self):
         video = Video(
@@ -136,9 +136,9 @@ class QueueTitleDisplayTests(unittest.TestCase):
         html = templates.env.get_template("queue.html").render(
             videos=[FakeQueuedVideo("-211437014_7", "-211437014_7")]
         )
-        self.assertIn("Untitled", html)
         self.assertIn("Algebra", html)
         self.assertNotIn("-211437014_7", html)
+        self.assertNotIn("Untitled", html)
 
 
 if __name__ == "__main__":

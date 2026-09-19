@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import os
 import re
@@ -30,6 +31,10 @@ _UNUSABLE_VIDEO_TITLES = frozenset(
         "scanning...",
         "subscription",
         "video",
+        "vk",
+        "vk video",
+        "vk видео",
+        "вконтакте",
     }
 )
 _VK_ID_RE = re.compile(r"^-?\d+_\d+$")
@@ -209,11 +214,46 @@ def download_folder_name(*, subscription_title: str = "", channel: str = "") -> 
     return "_single"
 
 
-def filename_title(title: str | None, external_id: str = "") -> str:
+def composed_title(
+    title: str | None = "",
+    *,
+    channel: str = "",
+    upload_date: str | None = None,
+    external_id: str = "",
+) -> str:
+    """Human name for UI and files. Untitled only when nothing else exists."""
     text = (title or "").strip()
     if is_usable_video_title(text, external_id):
         return text
+    date_part = format_upload_date(upload_date)
+    channel_name = (channel or "").strip()
+    if not is_usable_channel(channel_name):
+        channel_name = ""
+    if channel_name and date_part:
+        return f"{channel_name} · {date_part}"
+    if channel_name:
+        return channel_name
+    if date_part:
+        return f"Video {date_part}"
+    ext = str(external_id or "").strip()
+    if ext:
+        return f"Video {ext}"
     return "Untitled"
+
+
+def filename_title(
+    title: str | None,
+    external_id: str = "",
+    *,
+    channel: str = "",
+    upload_date: str | None = None,
+) -> str:
+    return composed_title(
+        title,
+        channel=channel,
+        upload_date=upload_date,
+        external_id=external_id,
+    )
 
 
 def format_upload_date(raw: str | None) -> str:
@@ -230,9 +270,18 @@ def download_stem(
     title: str,
     video_id: str,
     upload_date: str | None = None,
+    channel: str = "",
 ) -> str:
     date_part = format_upload_date(upload_date)
-    name = safe_component(filename_title(title, video_id), default="Untitled")
+    name = safe_component(
+        filename_title(
+            title,
+            video_id,
+            channel=channel,
+            upload_date=upload_date,
+        ),
+        default="Untitled",
+    )
     vid = safe_component(video_id or "id", default="id")[:80]
     if date_part:
         stem = f"{date_part} - {name} [{vid}]"
@@ -257,11 +306,12 @@ def build_download_output(
     title: str,
     video_id: str,
     upload_date: str | None = None,
+    channel: str = "",
 ) -> Path:
     dir_name = safe_component(folder, default="_single")
     if not is_usable_folder(dir_name):
         dir_name = "_single"
-    stem = download_stem(title, video_id, upload_date)
+    stem = download_stem(title, video_id, upload_date, channel=channel)
     return Path(settings.download_root) / dir_name / f"{stem}.%(ext)s"
 
 
@@ -319,13 +369,77 @@ def looks_like_no_data_blocks(log: str | None) -> bool:
     return _NO_DATA_BLOCKS in (log or "").lower()
 
 
+_ENTRY_TITLE_KEYS = (
+    "title",
+    "fulltitle",
+    "alt_title",
+    "track",
+    "series",
+    "episode_title",
+    "chapter",
+)
+_PAGE_TITLE_SUFFIXES = (
+    re.compile(r"\s*[|–—-]\s*VK Video\s*$", re.I),
+    re.compile(r"\s*[|–—-]\s*VK Видео\s*$", re.I),
+    re.compile(r"\s*[|–—-]\s*VK\s*$", re.I),
+    re.compile(r"\s*[|–—-]\s*ВКонтакте\s*$", re.I),
+)
+_OG_TITLE_RE = re.compile(
+    r"<meta[^>]+(?:property|name)=['\"]og:title['\"][^>]+content=['\"]([^'\"]+)['\"]",
+    re.I,
+)
+_OG_TITLE_RE_SWAP = re.compile(
+    r"<meta[^>]+content=['\"]([^'\"]+)['\"][^>]+(?:property|name)=['\"]og:title['\"]",
+    re.I,
+)
+_HTML_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
+
+
+def _first_description_line(text: str, external_id: str = "") -> str:
+    for raw in str(text or "").splitlines():
+        line = raw.strip()
+        if is_usable_video_title(line, external_id):
+            return line
+    return ""
+
+
+def clean_page_title(text: str | None, external_id: str = "") -> str:
+    value = html.unescape((text or "").strip())
+    value = re.sub(r"\s+", " ", value)
+    for suffix in _PAGE_TITLE_SUFFIXES:
+        value = suffix.sub("", value).strip()
+    if is_usable_video_title(value, external_id):
+        return value
+    return ""
+
+
+def title_from_html(markup: str | None, external_id: str = "") -> str:
+    text = markup or ""
+    for pattern in (_OG_TITLE_RE, _OG_TITLE_RE_SWAP):
+        match = pattern.search(text)
+        if match:
+            cleaned = clean_page_title(match.group(1), external_id)
+            if cleaned:
+                return cleaned
+    match = _HTML_TITLE_RE.search(text)
+    if match:
+        return clean_page_title(re.sub(r"<[^>]+>", "", match.group(1)), external_id)
+    return ""
+
+
 def title_from_entry(entry: dict | None, external_id: str = "") -> str:
     if not isinstance(entry, dict):
         return ""
-    for key in ("title", "fulltitle", "alt_title"):
+    for key in _ENTRY_TITLE_KEYS:
         value = entry.get(key)
         if isinstance(value, str) and is_usable_video_title(value, external_id):
             return value.strip()
+    for key in ("description", "synopsis"):
+        value = entry.get(key)
+        if isinstance(value, str):
+            line = _first_description_line(value, external_id)
+            if line:
+                return line
     return ""
 
 
@@ -545,7 +659,7 @@ async def _run(
     return proc.returncode, out, err
 
 
-async def fetch_flaresolverr_cookies(url: str) -> tuple[list[dict], str | None]:
+async def _flaresolverr_solution(url: str) -> dict:
     if not flaresolverr_enabled():
         raise RuntimeError("FlareSolverr is not configured")
 
@@ -565,11 +679,15 @@ async def fetch_flaresolverr_cookies(url: str) -> tuple[list[dict], str | None]:
 
     solution = data.get("solution") or {}
     cookies = solution.get("cookies") or []
-    user_agent = solution.get("userAgent") or None
     if not cookies:
         raise RuntimeError("FlareSolverr returned no cookies")
     print(f"vkget: FlareSolverr cookies for {url}", flush=True)
-    return cookies, user_agent
+    return solution
+
+
+async def fetch_flaresolverr_cookies(url: str) -> tuple[list[dict], str | None]:
+    solution = await _flaresolverr_solution(url)
+    return solution.get("cookies") or [], solution.get("userAgent") or None
 
 
 async def _ytdlp_json(
@@ -623,6 +741,87 @@ async def _try_hosts_json(
     raise RuntimeError(" | ".join(errors) or "yt-dlp failed")
 
 
+def _cookie_map(extra_cookies: list[dict] | None = None) -> dict[str, str]:
+    cookies: dict[str, str] = {}
+    if extra_cookies:
+        for cookie in extra_cookies:
+            name = str(cookie.get("name") or "").strip()
+            if name:
+                cookies[name] = str(cookie.get("value") or "")
+        return cookies
+    path = settings.cookie_file
+    if not path or not os.path.exists(path):
+        return cookies
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            body = handle.read()
+    except OSError:
+        return cookies
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            if not stripped.startswith("#HttpOnly_"):
+                continue
+            stripped = stripped[len("#HttpOnly_") :]
+        parts = stripped.split("\t")
+        if len(parts) >= 7:
+            cookies[parts[5]] = parts[6]
+    return cookies
+
+
+async def _get_page_title(
+    url: str,
+    external_id: str = "",
+    *,
+    extra_cookies: list[dict] | None = None,
+    user_agent: str | None = None,
+) -> tuple[str, str]:
+    headers = {"User-Agent": user_agent or "Mozilla/5.0 vkget"}
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as client:
+            response = await client.get(
+                url,
+                headers=headers,
+                cookies=_cookie_map(extra_cookies),
+            )
+    except Exception as exc:
+        return "", str(exc)
+    if response.status_code >= 400:
+        return "", f"HTTP {response.status_code} {url}"
+    title = title_from_html(response.text, external_id)
+    if title:
+        return title, ""
+    if looks_like_bot_protection(response.text):
+        return "", f"challenge: {url}"
+    return "", f"no title: {url}"
+
+
+async def fetch_page_title(url: str, external_id: str = "") -> str:
+    """og:title / <title> when yt-dlp JSON has no usable name."""
+    for candidate in download_url_candidates(url):
+        title, err = await _get_page_title(candidate, external_id)
+        if title:
+            return title
+        if not (flaresolverr_enabled() and looks_like_bot_protection(err)):
+            continue
+        try:
+            solution = await _flaresolverr_solution(candidate)
+        except Exception:
+            continue
+        html_title = title_from_html(str(solution.get("response") or ""), external_id)
+        if html_title:
+            return html_title
+        title, _ = await _get_page_title(
+            candidate,
+            external_id,
+            extra_cookies=solution.get("cookies") or [],
+            user_agent=solution.get("userAgent") or None,
+        )
+        if title:
+            return title
+    return ""
+
+
 async def inspect_url(url: str) -> dict:
     extra = [
         "--dump-single-json",
@@ -655,10 +854,11 @@ async def resolve_video_metadata(
     )
     if not needs_inspect:
         return result
+    info: dict = {}
     try:
         info = await inspect_url(url)
     except Exception:
-        return result
+        info = {}
     ext = str(info.get("id") or external_id)
     resolved = title_from_entry(info, ext)
     if resolved:
@@ -681,6 +881,10 @@ async def resolve_video_metadata(
             result["upload_date"] = stamp.strftime("%Y%m%d")
         except (TypeError, ValueError, OSError, OverflowError):
             pass
+    if not is_usable_video_title(result["title"], external_id or ext):
+        page_title = await fetch_page_title(url, ext or external_id)
+        if page_title:
+            result["title"] = page_title
     return result
 
 
@@ -1072,6 +1276,7 @@ async def download_video(
         title=title,
         video_id=video_id,
         upload_date=upload_date,
+        channel=channel,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output = str(output_path)

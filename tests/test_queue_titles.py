@@ -12,6 +12,8 @@ from sqlalchemy.orm import sessionmaker
 from app.db import Base
 from app.models import Subscription, Video
 from app.ytdlp import (
+    build_download_output,
+    composed_title,
     is_usable_channel,
     is_usable_video_title,
     resolve_video_metadata,
@@ -38,6 +40,27 @@ class UsableTitleTests(unittest.TestCase):
         for title in cases:
             with self.subTest(title=title):
                 self.assertFalse(is_usable_video_title(title, ext))
+
+    def test_title_from_html_strips_vk_suffix(self):
+        from app.ytdlp import title_from_html
+
+        ext = "-1_2"
+        self.assertEqual(
+            title_from_html(
+                '<meta property="og:title" content="Real talk | VK Video">',
+                ext,
+            ),
+            "Real talk",
+        )
+        self.assertEqual(
+            title_from_html("<title>Real talk | VK</title>", ext),
+            "Real talk",
+        )
+        self.assertEqual(title_from_html("<title>NA</title>", ext), "")
+        self.assertEqual(
+            title_from_html("<title>ВКонтакте | VK Видео</title>", ext),
+            "",
+        )
 
     def test_accepts_human_title(self):
         self.assertTrue(
@@ -74,6 +97,64 @@ class UsableTitleTests(unittest.TestCase):
         self.assertEqual(
             title_from_entry({"title": "NA", "fulltitle": ext}, ext),
             "",
+        )
+        self.assertEqual(
+            title_from_entry(
+                {
+                    "title": "NA",
+                    "description": "https://vk.com/video-123_456\nReal talk from the description\nMore",
+                },
+                ext,
+            ),
+            "Real talk from the description",
+        )
+        self.assertEqual(
+            title_from_entry({"title": "NA", "track": "Named track"}, ext),
+            "Named track",
+        )
+
+    def test_composed_title_uses_channel_date_or_id(self):
+        ext = "-123_456"
+        self.assertEqual(
+            composed_title("NA", channel="Algebra", upload_date="20240115", external_id=ext),
+            "Algebra · 2024-01-15",
+        )
+        self.assertEqual(
+            composed_title("NA", channel="Algebra", external_id=ext),
+            "Algebra",
+        )
+        self.assertEqual(
+            composed_title("NA", upload_date="20240115", external_id=ext),
+            "Video 2024-01-15",
+        )
+        self.assertEqual(composed_title("NA", external_id=ext), f"Video {ext}")
+        self.assertEqual(
+            composed_title("Lecture 4", channel="Algebra", external_id=ext),
+            "Lecture 4",
+        )
+
+    def test_download_name_uses_id_or_channel_not_untitled(self):
+        path = build_download_output(
+            folder="Subscription",
+            title="Video -214484275_456239461",
+            video_id="-214484275_456239461",
+            upload_date="NA",
+        )
+        self.assertEqual(
+            path.name,
+            "Video -214484275_456239461 [-214484275_456239461].%(ext)s",
+        )
+        self.assertNotIn("Untitled", path.name)
+        dated = build_download_output(
+            folder="Subscription",
+            title="NA",
+            video_id="-1_2",
+            upload_date="20240115",
+            channel="Algebra",
+        )
+        self.assertEqual(
+            dated.name,
+            "2024-01-15 - Algebra · 2024-01-15 [-1_2].%(ext)s",
         )
 
 
@@ -142,6 +223,43 @@ class ResolveTitleTests(unittest.IsolatedAsyncioTestCase):
                 external_id="-1_2",
             )
         self.assertEqual(meta["upload_date"], "20240115")
+
+    async def test_metadata_uses_og_title_when_json_has_no_name(self):
+        inspect = AsyncMock(return_value={"id": "-1_2", "title": "NA"})
+        page = AsyncMock(return_value="Talk from the page")
+        with patch("app.ytdlp.inspect_url", inspect), patch(
+            "app.ytdlp.fetch_page_title", page
+        ):
+            meta = await resolve_video_metadata(
+                "https://vk.com/video-1_2",
+                title="NA",
+                channel="Subscription",
+                upload_date=None,
+                external_id="-1_2",
+            )
+        self.assertEqual(meta["title"], "Talk from the page")
+        page.assert_awaited_once()
+
+    async def test_fetch_page_title_reads_og_title(self):
+        from app.ytdlp import fetch_page_title
+
+        class FakeResponse:
+            status_code = 200
+            text = '<meta property="og:title" content="Page talk | VK">'
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def get(self, url, headers=None, cookies=None):
+                return FakeResponse()
+
+        with patch("app.ytdlp.httpx.AsyncClient", return_value=FakeClient()):
+            title = await fetch_page_title("https://vk.com/video-1_2", "-1_2")
+        self.assertEqual(title, "Page talk")
 
     async def test_metadata_skips_inspect_when_complete(self):
         with patch("app.ytdlp.inspect_url", new_callable=AsyncMock) as inspect:

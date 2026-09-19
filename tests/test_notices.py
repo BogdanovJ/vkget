@@ -50,7 +50,7 @@ class FormatVideoNoticeTests(unittest.TestCase):
         )
         lines = text.splitlines()
         self.assertEqual(lines[0], "✅ VKGET")
-        self.assertEqual(lines[1], "Untitled")
+        self.assertEqual(lines[1], "Video -214484275_456239461")
         self.assertEqual(lines[2], "Downloaded ≤720p")
         self.assertIn("https://vkvideo.ru/video-214484275_456239461", text)
         self.assertNotIn("Subscription ·", text)
