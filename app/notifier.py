@@ -1,6 +1,6 @@
 import httpx
 from .config import settings
-from .ytdlp import is_usable_channel, is_usable_video_title, to_vkvideo
+from .ytdlp import composed_title, is_usable_channel, to_vkvideo
 
 
 def format_video_notice(
@@ -15,9 +15,7 @@ def format_video_notice(
     retry_at=None,
     external_id: str = "",
 ) -> str:
-    shown_title = (title or "").strip()
-    if not is_usable_video_title(shown_title, external_id):
-        shown_title = "Untitled"
+    shown_title = composed_title(title, channel=channel, external_id=external_id)
     shown_channel = channel if is_usable_channel(channel) else ""
     page = to_vkvideo(page_url) if page_url else ""
     lines = ["✅ VKGET" if ok else "⚠ VKGET", shown_title]

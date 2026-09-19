@@ -421,8 +421,24 @@ class DownloadPathTests(unittest.TestCase):
             upload_date="NA",
         )
         self.assertEqual(path.parent.name, "_single")
-        self.assertEqual(path.name, "Untitled [-214484275_456239461].%(ext)s")
+        self.assertEqual(
+            path.name,
+            "Video -214484275_456239461 [-214484275_456239461].%(ext)s",
+        )
         self.assertNotIn("NA -", path.name)
+        self.assertNotIn("Untitled", path.name)
+
+        dated = build_download_output(
+            folder="Subscription",
+            title="NA",
+            video_id="-1_2",
+            upload_date="20240115",
+            channel="Algebra",
+        )
+        self.assertEqual(
+            dated.name,
+            "2024-01-15 - Algebra · 2024-01-15 [-1_2].%(ext)s",
+        )
 
     def test_playlist_id_subscription_name_is_a_valid_folder(self):
         self.assertEqual(
