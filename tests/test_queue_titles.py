@@ -57,6 +57,10 @@ class UsableTitleTests(unittest.TestCase):
             "Real talk",
         )
         self.assertEqual(title_from_html("<title>NA</title>", ext), "")
+        self.assertEqual(
+            title_from_html("<title>ВКонтакте | VK Видео</title>", ext),
+            "",
+        )
 
     def test_accepts_human_title(self):
         self.assertTrue(

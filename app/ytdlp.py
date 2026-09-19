@@ -31,6 +31,10 @@ _UNUSABLE_VIDEO_TITLES = frozenset(
         "scanning...",
         "subscription",
         "video",
+        "vk",
+        "vk video",
+        "vk видео",
+        "вконтакте",
     }
 )
 _VK_ID_RE = re.compile(r"^-?\d+_\d+$")
@@ -376,6 +380,7 @@ _ENTRY_TITLE_KEYS = (
 )
 _PAGE_TITLE_SUFFIXES = (
     re.compile(r"\s*[|–—-]\s*VK Video\s*$", re.I),
+    re.compile(r"\s*[|–—-]\s*VK Видео\s*$", re.I),
     re.compile(r"\s*[|–—-]\s*VK\s*$", re.I),
     re.compile(r"\s*[|–—-]\s*ВКонтакте\s*$", re.I),
 )
