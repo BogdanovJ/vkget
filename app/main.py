@@ -21,9 +21,11 @@ from .queue import (
     move_queue_item,
     next_queue_rank,
     pause_item,
+    pop_queue_flash,
     queue_order,
     resume_item,
     retry_now,
+    set_queue_flash,
     set_queue_paused,
 )
 from .selfcheck import load_selfcheck, run_selfcheck, selfcheck_summary
@@ -261,6 +263,11 @@ async def add_one_off(
     if not external_id:
         raise HTTPException(400, "Could not determine video ID")
 
+    video_title = title_from_entry(data, external_id)
+    if not video_title:
+        raw = data.get("title") or data.get("fulltitle") or data.get("alt_title") or ""
+        video_title = str(raw).strip() or f"Video {external_id}"
+
     existing = db.scalar(
         select(Video).where(
             Video.source == "vk",
@@ -268,12 +275,13 @@ async def add_one_off(
         )
     )
     if existing:
+        notice_title = existing.display_title() or video_title
+        if existing.status == "DOWNLOADING":
+            set_queue_flash(db, f"Already downloading: {notice_title}")
+            return RedirectResponse("/queue", status_code=303)
+        retry_now(db, existing)
+        set_queue_flash(db, f"Queued: {existing.display_title() or notice_title}")
         return RedirectResponse("/queue", status_code=303)
-
-    video_title = title_from_entry(data, external_id)
-    if not video_title:
-        raw = data.get("title") or data.get("fulltitle") or data.get("alt_title") or ""
-        video_title = str(raw).strip() or f"Video {external_id}"
 
     video = Video(
         source="vk",
@@ -294,6 +302,8 @@ async def add_one_off(
 
     db.add(video)
     db.commit()
+    retry_now(db, video)
+    set_queue_flash(db, f"Queued: {video.display_title()}")
 
     return RedirectResponse("/queue", status_code=303)
 
@@ -452,6 +462,7 @@ def queue(request: Request, db: Session = Depends(get_db)):
         context={
             "videos": videos,
             "queue_paused": is_queue_paused(db),
+            "flash": pop_queue_flash(db),
         },
     )
 

@@ -9,6 +9,12 @@
   <span class="badge vpn-flag {{ 'off' if queue_paused else 'on' }}">{{ "PAUSED" if queue_paused else "LIVE" }}</span>
 </section>
 
+{% if flash %}
+<div class="notice">
+  {{ flash }}
+</div>
+{% endif %}
+
 <section class="panel vpn-routing">
   {% if queue_paused %}
   <p>Downloads are paused. A job that already started will finish; nothing new will start.</p>

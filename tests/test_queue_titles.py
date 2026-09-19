@@ -220,19 +220,19 @@ class ScanQueueTitleTests(unittest.IsolatedAsyncioTestCase):
 
             await scan_subscription(sub_id, initial=True)
 
-        self.assertEqual(inspected, ["https://vk.com/video-1_2"])
+        self.assertEqual(inspected, ["https://vk.com/video-1_1"])
         with self.Session() as db:
             videos = {
                 v.external_id: v
                 for v in db.scalars(select(Video)).all()
             }
-            self.assertEqual(videos["-1_1"].status, "IGNORED_INITIAL_HISTORY")
-            self.assertEqual(videos["-1_1"].title, "NA")
-            self.assertEqual(videos["-1_2"].status, "QUEUED")
-            self.assertEqual(videos["-1_2"].title, "Real queued lecture")
-            self.assertEqual(videos["-1_2"].channel, "Algebra channel")
-            self.assertEqual(videos["-1_2"].upload_date, "20240115")
-            self.assertEqual(videos["-1_2"].display_title(), "Real queued lecture")
+            self.assertEqual(videos["-1_1"].status, "QUEUED")
+            self.assertEqual(videos["-1_1"].title, "Real queued lecture")
+            self.assertEqual(videos["-1_1"].channel, "Algebra channel")
+            self.assertEqual(videos["-1_1"].upload_date, "20240115")
+            self.assertEqual(videos["-1_1"].display_title(), "Real queued lecture")
+            self.assertEqual(videos["-1_2"].status, "IGNORED_INITIAL_HISTORY")
+            self.assertEqual(videos["-1_2"].title, "-1_2")
 
     async def test_scan_does_not_inspect_queued_human_title(self):
         with self.Session() as db:
@@ -275,6 +275,122 @@ class ScanQueueTitleTests(unittest.IsolatedAsyncioTestCase):
             video = db.scalar(select(Video))
             self.assertEqual(video.title, "Already named")
             self.assertEqual(video.status, "QUEUED")
+
+    async def test_undated_last_n_takes_playlist_head(self):
+        with self.Session() as db:
+            sub = Subscription(
+                source_url="https://vk.com/playlist/-1_2",
+                title="Algebra",
+                initial_last_n=2,
+                min_duration_seconds=0,
+                extra_stop_words="",
+                watch_future=True,
+                enabled=True,
+                next_scan_at=datetime.now(),
+            )
+            db.add(sub)
+            db.commit()
+            sub_id = sub.id
+
+        playlist = {
+            "title": "Algebra",
+            "entries": [
+                {"id": "-1_new", "url": "https://vk.com/video-1_new", "title": "Newest"},
+                {"id": "-1_mid", "url": "https://vk.com/video-1_mid", "title": "Second"},
+                {"id": "-1_old", "url": "https://vk.com/video-1_old", "title": "Older"},
+                {"id": "-1_oldest", "url": "https://vk.com/video-1_oldest", "title": "Oldest"},
+            ],
+        }
+
+        with patch("app.scheduler.SessionLocal", self.Session), patch(
+            "app.scheduler.inspect_playlist_flat",
+            AsyncMock(return_value=playlist),
+        ), patch(
+            "app.scheduler.resolve_video_metadata",
+            new=AsyncMock(side_effect=AssertionError("should not inspect")),
+        ):
+            from app.scheduler import scan_subscription
+
+            await scan_subscription(sub_id, initial=True)
+
+        with self.Session() as db:
+            videos = {
+                v.external_id: v
+                for v in db.scalars(select(Video)).all()
+            }
+            self.assertEqual(videos["-1_new"].status, "QUEUED")
+            self.assertEqual(videos["-1_mid"].status, "QUEUED")
+            self.assertEqual(videos["-1_old"].status, "IGNORED_INITIAL_HISTORY")
+            self.assertEqual(videos["-1_oldest"].status, "IGNORED_INITIAL_HISTORY")
+            self.assertLess(videos["-1_new"].queue_rank, videos["-1_mid"].queue_rank)
+
+    async def test_dated_last_n_uses_upload_dates(self):
+        with self.Session() as db:
+            sub = Subscription(
+                source_url="https://vk.com/playlist/-1_2",
+                title="Algebra",
+                initial_last_n=2,
+                min_duration_seconds=0,
+                extra_stop_words="",
+                watch_future=True,
+                enabled=True,
+                next_scan_at=datetime.now(),
+            )
+            db.add(sub)
+            db.commit()
+            sub_id = sub.id
+
+        playlist = {
+            "title": "Algebra",
+            "entries": [
+                {
+                    "id": "-1_old",
+                    "url": "https://vk.com/video-1_old",
+                    "title": "Old",
+                    "upload_date": "20220101",
+                },
+                {
+                    "id": "-1_mid",
+                    "url": "https://vk.com/video-1_mid",
+                    "title": "Mid",
+                    "upload_date": "20230101",
+                },
+                {
+                    "id": "-1_new",
+                    "url": "https://vk.com/video-1_new",
+                    "title": "New",
+                    "upload_date": "20240101",
+                },
+                {
+                    "id": "-1_older",
+                    "url": "https://vk.com/video-1_older",
+                    "title": "Older",
+                    "upload_date": "20210101",
+                },
+            ],
+        }
+
+        with patch("app.scheduler.SessionLocal", self.Session), patch(
+            "app.scheduler.inspect_playlist_flat",
+            AsyncMock(return_value=playlist),
+        ), patch(
+            "app.scheduler.resolve_video_metadata",
+            new=AsyncMock(side_effect=AssertionError("should not inspect")),
+        ):
+            from app.scheduler import scan_subscription
+
+            await scan_subscription(sub_id, initial=True)
+
+        with self.Session() as db:
+            videos = {
+                v.external_id: v
+                for v in db.scalars(select(Video)).all()
+            }
+            self.assertEqual(videos["-1_new"].status, "QUEUED")
+            self.assertEqual(videos["-1_mid"].status, "QUEUED")
+            self.assertEqual(videos["-1_old"].status, "IGNORED_INITIAL_HISTORY")
+            self.assertEqual(videos["-1_older"].status, "IGNORED_INITIAL_HISTORY")
+            self.assertLess(videos["-1_new"].queue_rank, videos["-1_mid"].queue_rank)
 
 
 if __name__ == "__main__":

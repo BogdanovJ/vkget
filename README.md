@@ -5,7 +5,7 @@ Self-hosted VK/VKVideo subscription manager for k3s.
 Features:
 - one-off URLs
 - playlist/channel subscriptions
-- initial "last N" import
+- initial "last N" newest videos first
 - future discovery with remembered history
 - duration and stop-word filtering
 - hard 720p ceiling
