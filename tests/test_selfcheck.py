@@ -14,6 +14,7 @@ from app.selfcheck import (
     ComponentCheck,
     _write_cache,
     collect_checks,
+    format_git_sha,
     format_version,
     load_selfcheck,
     parse_version,
@@ -27,6 +28,12 @@ class VersionParseTests(unittest.TestCase):
         self.assertEqual(parse_version("2026.08.19"), (2026, 8, 19))
         self.assertEqual(format_version((2026, 8, 19)), "2026.08.19")
         self.assertIsNone(parse_version("not a version"))
+
+    def test_shortens_git_sha(self):
+        self.assertEqual(format_git_sha("d5bc9dd0abc1234"), "d5bc9dd")
+        self.assertEqual(format_git_sha("D5BC9DD"), "d5bc9dd")
+        self.assertEqual(format_git_sha("unknown"), "")
+        self.assertEqual(format_git_sha(""), "")
 
 
 class SelfCheckTests(unittest.TestCase):
@@ -60,6 +67,27 @@ class SelfCheckTests(unittest.TestCase):
             "app.selfcheck._database_check",
             return_value=ComponentCheck("database", "DATABASE", True, "OK", "connected", "ok"),
         )
+
+    def test_image_sha_is_reported(self):
+        with self._settings(), self._ok_db(), patch(
+            "app.selfcheck._run", return_value=(0, "2026.09.01")
+        ), patch("app.selfcheck.shutil.which", return_value="/bin/true"), patch(
+            "app.selfcheck.storage_ok", return_value=True
+        ), patch("app.selfcheck.IMAGE_GIT_SHA", "d5bc9dd0abc1234ffff"):
+            items = {item.id: item for item in collect_checks("2026.09.01")}
+        self.assertEqual(items["image"].status, "OK")
+        self.assertEqual(items["image"].current, "d5bc9dd")
+        self.assertTrue(items["image"].ok)
+
+    def test_missing_image_sha_is_unknown(self):
+        with self._settings(), self._ok_db(), patch(
+            "app.selfcheck._run", return_value=(0, "2026.09.01")
+        ), patch("app.selfcheck.shutil.which", return_value="/bin/true"), patch(
+            "app.selfcheck.storage_ok", return_value=True
+        ), patch("app.selfcheck.IMAGE_GIT_SHA", ""):
+            items = {item.id: item for item in collect_checks("2026.09.01")}
+        self.assertEqual(items["image"].current, "unknown")
+        self.assertTrue(items["image"].ok)
 
     def test_missing_ytdlp_is_reported(self):
         def fake_run(args, timeout=4):
@@ -283,6 +311,7 @@ class SystemTemplateTests(unittest.TestCase):
             ]
         )
         self.assertIn("YTDLP_VERSION", html)
+        self.assertIn("kustomization.yaml", html)
         self.assertIn("UPDATE", html)
         self.assertIn("2026.08.19", html)
         self.assertIn("2026.09.01", html)

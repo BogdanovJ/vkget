@@ -111,6 +111,7 @@ docker run --rm --cap-add=NET_ADMIN --device /dev/net/tun \
 
 The `/system` page inspects components inside the vkget container:
 
+- image build SHA (`VKGET_GIT_SHA`)
 - yt-dlp (installed version vs the latest GitHub release)
 - ffmpeg / ffprobe
 - cookies file
@@ -129,17 +130,24 @@ It does not upgrade binaries in the running pod.
 To update yt-dlp:
 
 1. Set `YTDLP_VERSION` in the Dockerfile to the GitHub release tag (currently `2026.08.19`).
-2. Push to `main` so Actions rebuilds `ghcr.io/bogdanovj/vkget:latest`.
-3. Restart the workload: `kubectl -n vkget rollout restart deploy/vkget`.
+2. Push to `main` so Actions publishes `:latest` and `:<short-sha>`.
+3. Set both `newTag` fields in `k8s/kustomization.yaml` to that short SHA and apply / let Flux reconcile.
 
 `/healthz` stays a cheap liveness probe and does not call GitHub.
 
 ## Deploy
 
-1. Push to `main`. GitHub Actions builds `linux/arm64` and publishes `ghcr.io/bogdanovj/vkget:latest`.
-2. Restart the workload yourself so it pulls the new image, e.g. `kubectl -n vkget rollout restart deploy/vkget`.
-3. Create the MariaDB database/user with `sql/bootstrap.sql`.
-4. Create SOPS secrets from the examples in `k8s/`.
-5. Set the storage node selector in `k8s/deployment.yaml`.
-6. Change the image reference.
+Each push to `main` publishes `linux/arm64` images as:
+
+- `ghcr.io/bogdanovj/vkget:latest` and `ghcr.io/bogdanovj/vkget-vpn-gateway:latest` (moving pointers)
+- `ghcr.io/bogdanovj/vkget:<short-sha>` and `ghcr.io/bogdanovj/vkget-vpn-gateway:<short-sha>` (immutable)
+
+`:latest` is only a convenience tag. The cluster pin is `images.newTag` in `k8s/kustomization.yaml`.
+
+1. Push to `main` and wait for the Publish workflow.
+2. When you want that build in-cluster, set both `newTag` values to the short SHA from the Actions log or GHCR package, then apply / let Flux reconcile. A pin change is the rollout; `kubectl rollout restart` is not how you pick up a new `:latest`.
+3. Confirm `/system` shows the same IMAGE SHA as the pin.
+4. Create the MariaDB database/user with `sql/bootstrap.sql`.
+5. Create SOPS secrets from the examples in `k8s/`.
+6. Set the storage node selector in `k8s/deployment.yaml`.
 7. Apply with Flux/Kustomize.

@@ -3,6 +3,8 @@ FROM alpine:3.21
 # microsocks is not packaged for Alpine 3.21 aarch64 (only edge/testing x86_64),
 # so build the small upstream binary instead of depending on apk.
 ARG MICROSOCKS_VERSION=1.0.5
+ARG VKGET_GIT_SHA=unknown
+ENV VKGET_GIT_SHA=${VKGET_GIT_SHA}
 
 RUN apk add --no-cache \
         openvpn \

@@ -12,3 +12,11 @@ resources:
 # Add encrypted secret files after creating them:
 #  - secret.sops.yaml
 #  - cookies-secret.sops.yaml
+
+# Pin both images to the same short git SHA after Actions publishes it.
+# Leave latest until that SHA exists on GHCR.
+images:
+  - name: ghcr.io/bogdanovj/vkget
+    newTag: latest
+  - name: ghcr.io/bogdanovj/vkget-vpn-gateway
+    newTag: latest

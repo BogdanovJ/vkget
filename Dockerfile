@@ -1,7 +1,9 @@
 FROM python:3.12-slim
 
 ARG YTDLP_VERSION=2026.08.19
+ARG VKGET_GIT_SHA=unknown
 ENV YTDLP_VERSION=${YTDLP_VERSION}
+ENV VKGET_GIT_SHA=${VKGET_GIT_SHA}
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates \

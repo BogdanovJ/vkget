@@ -23,7 +23,7 @@ spec:
 
       containers:
         - name: vkget
-          image: ghcr.io/bogdanovj/vkget:latest
+          image: ghcr.io/bogdanovj/vkget
           imagePullPolicy: Always
           ports:
             - containerPort: 8080

@@ -22,6 +22,7 @@ CACHE_KEY = "system_check_cache"
 CACHE_HOURS = 6
 YTDLP_BIN = os.getenv("YTDLP_BIN", "/usr/local/bin/yt-dlp")
 IMAGE_YTDLP_VERSION = os.getenv("YTDLP_VERSION", "")
+IMAGE_GIT_SHA = os.getenv("VKGET_GIT_SHA", "")
 YTDLP_LATEST_URL = os.getenv(
     "YTDLP_LATEST_URL",
     "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest",
@@ -55,6 +56,36 @@ def format_version(parts: tuple[int, int, int] | None) -> str:
     if not parts:
         return ""
     return f"{parts[0]}.{parts[1]:02d}.{parts[2]:02d}"
+
+
+def format_git_sha(raw: str | None) -> str:
+    text = (raw or "").strip()
+    if not text or text.lower() in {"unknown", "none"}:
+        return ""
+    if re.fullmatch(r"[0-9a-fA-F]{7,40}", text):
+        return text[:7].lower()
+    return text[:12]
+
+
+def _image_check() -> ComponentCheck:
+    sha = format_git_sha(IMAGE_GIT_SHA)
+    if sha:
+        return ComponentCheck(
+            "image",
+            "IMAGE",
+            True,
+            "OK",
+            sha,
+            "container build SHA",
+        )
+    return ComponentCheck(
+        "image",
+        "IMAGE",
+        True,
+        "OK",
+        "unknown",
+        "local or untagged build",
+    )
 
 
 def _run(args: list[str], timeout: float = 8) -> tuple[int, str]:
@@ -286,6 +317,7 @@ def _cache_fresh(cache: dict, current: datetime) -> bool:
 
 def collect_checks(latest_ytdlp: str | None = None) -> list[ComponentCheck]:
     return [
+        _image_check(),
         _ytdlp_check(latest_ytdlp),
         _binary_check("ffmpeg", "FFMPEG", ["ffmpeg", "-version"], "ffmpeg is not installed"),
         _binary_check("ffprobe", "FFPROBE", ["ffprobe", "-version"], "ffprobe is not installed"),

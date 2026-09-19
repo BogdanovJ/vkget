@@ -14,7 +14,8 @@
   {% if system.ytdlp_update %}
   <p>
     A newer yt-dlp is on GitHub. Change <code>YTDLP_VERSION</code> in the Dockerfile,
-    push to <code>main</code>, then restart the vkget deploy.
+    push to <code>main</code>, then pin the new image SHA in
+    <code>k8s/kustomization.yaml</code>.
     In-pod upgrades are lost on the next rollout.
   </p>
   {% endif %}
