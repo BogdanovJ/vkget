@@ -32,6 +32,7 @@ class Subscription(Base):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     title_is_custom: Mapped[bool] = mapped_column(Boolean, default=False)
     last_scan_result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retention_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     videos: Mapped[list["Video"]] = relationship(
         back_populates="subscription",

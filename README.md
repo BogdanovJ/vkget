@@ -32,6 +32,8 @@ Files are remuxed or transcoded to a Samsung-safe MP4: H.264 High@L4.0, 8-bit 4:
 
 One-off downloads use the uploader name, or `_single`. Placeholder leftovers (`Subscription`, `Unknown`, `NA`) are never used as folder names. If the upload date is unknown, the date prefix is omitted instead of writing `NA`.
 
+Retention deletes only a file path vkget stored on a completed download. The SUBS page sets a common keep period in days. Blank or `0` keeps files. A subscription can override that: blank uses the common policy, `0` keeps that subscription's files, and a positive number is days after the download finished. The catalogue row stays, marked `EXPIRED`, so the video is not downloaded again. Other files in `/downloads` are left alone. Deleting a subscription still drops its catalogue and leaves its files on disk.
+
 ## Database
 
 Use the existing MariaDB instance with a dedicated database/user named `vkget`.

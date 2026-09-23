@@ -23,6 +23,7 @@ class FakeSub:
     min_duration_seconds = 600
     extra_stop_words = ""
     watch_future = True
+    retention_days = None
 
     def display_title(self) -> str:
         return "Playlist"

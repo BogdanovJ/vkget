@@ -9,6 +9,16 @@
 </section>
 
 <section class="panel">
+  <h2>RETENTION</h2>
+  <p class="muted">COMMON POLICY FOR FILES THIS APP DOWNLOADED. BLANK OR 0 KEEPS THEM. A SUBSCRIPTION CAN OVERRIDE THIS.</p>
+  <form method="post" action="/subscriptions/retention">
+    <label>KEEP FILES (DAYS)</label>
+    <input type="number" name="retention_days" min="0" step="1" placeholder="KEEP" value="{% if common_retention_days %}{{ common_retention_days }}{% endif %}">
+    <button>SAVE POLICY</button>
+  </form>
+</section>
+
+<section class="panel">
 {% for s in subs %}
   <a class="row big" href="/subscriptions/{{ s.id }}">
     <span>

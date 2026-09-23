@@ -14,6 +14,7 @@ from .filters import rejection_reason
 from .models import AppState, Subscription, Video
 from .notifier import format_video_notice, notify
 from .queue import RUNNABLE_STATUSES, is_queue_paused, next_queue_rank, queue_order
+from .retention import apply_retention
 from .vpn.runtime import download_with_vpn
 from .ytdlp import (
     PLACEHOLDER_TITLES,
@@ -736,6 +737,8 @@ async def scheduler_loop():
 
             await resolve_placeholder_queued_titles()
             await run_one_download()
+            with SessionLocal() as db:
+                apply_retention(db)
             delay = SCHEDULER_SLEEP_SECONDS
 
         except DB_ERRORS as exc:

@@ -71,6 +71,15 @@ def ensure_schema():
             conn.execute(
                 text("ALTER TABLE subscriptions ADD COLUMN last_scan_result TEXT NULL")
             )
+        columns.add("last_scan_result")
+    if "retention_days" not in columns:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "ALTER TABLE subscriptions "
+                    "ADD COLUMN retention_days INTEGER NULL"
+                )
+            )
     if "videos" in inspector.get_table_names():
         video_columns = {col["name"] for col in inspector.get_columns("videos")}
         if "queue_rank" not in video_columns:
