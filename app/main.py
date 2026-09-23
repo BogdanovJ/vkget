@@ -14,6 +14,12 @@ from sqlalchemy.orm import Session
 from .config import settings
 from .db import ensure_schema, get_db, wait_for_database
 from .models import AppState, Subscription, Video, VpnProfile
+from .retention import (
+    describe_retention,
+    get_common_retention_days,
+    parse_retention_form,
+    set_common_retention_days,
+)
 from .queue import (
     delete_from_queue,
     is_queue_paused,
@@ -201,8 +207,20 @@ def subscriptions(request: Request, db: Session = Depends(get_db)):
     return templates.TemplateResponse(
         request=request,
         name="subscriptions.html",
-        context={"subs": subs},
+        context={
+            "subs": subs,
+            "common_retention_days": get_common_retention_days(db),
+        },
     )
+
+
+@app.post("/subscriptions/retention")
+def update_common_retention(
+    retention_days: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    set_common_retention_days(db, parse_retention_form(retention_days))
+    return RedirectResponse("/subscriptions", status_code=303)
 
 @app.get("/add", response_class=HTMLResponse)
 def add_page(request: Request):
@@ -331,6 +349,10 @@ def subscription_detail(
         context={
             "sub": sub,
             "videos": videos,
+            "retention_label": describe_retention(
+                sub.retention_days,
+                get_common_retention_days(db),
+            ),
         },
     )
 
@@ -340,6 +362,7 @@ def update_subscription_profile(
     name: str = Form(""),
     min_duration_minutes: int = Form(10),
     stop_words: str = Form(""),
+    retention_days: str = Form(""),
     watch_future: str | None = Form(None),
     enabled: str | None = Form(None),
     db: Session = Depends(get_db),
@@ -358,6 +381,7 @@ def update_subscription_profile(
 
     sub.min_duration_seconds = max(min_duration_minutes, 0) * 60
     sub.extra_stop_words = stop_words
+    sub.retention_days = parse_retention_form(retention_days)
     sub.watch_future = watch_future == "on"
     sub.enabled = enabled == "on"
     db.commit()
