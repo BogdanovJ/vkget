@@ -11,7 +11,7 @@ from sqlalchemy.exc import InterfaceError, OperationalError
 from .config import settings
 from .db import SessionLocal, reset_pool
 from .filters import rejection_reason
-from .models import AppState, Subscription, Video
+from .models import AppState, Subscription, Video, format_published
 from .notifier import format_video_notice, notify
 from .queue import RUNNABLE_STATUSES, is_queue_paused, next_queue_rank, queue_order
 from .retention import apply_retention
@@ -76,6 +76,58 @@ def newest_initial_ids(entries, limit: int) -> set[str]:
         )
         return {str(entry.get("id")) for entry in ordered[:limit]}
     return {str(entry.get("id")) for entry in usable[:limit]}
+
+
+def published_at_from_upload_date(raw) -> datetime | None:
+    digits = "".join(ch for ch in str(raw or "") if ch.isdigit())[:8]
+    if len(digits) != 8:
+        return None
+    try:
+        return datetime.strptime(digits, "%Y%m%d")
+    except ValueError:
+        return None
+
+
+def published_at_from_entry(entry) -> datetime | None:
+    """Publish time from a playlist entry. Dates without a clock stay at midnight."""
+    if not entry:
+        return None
+    for field in ("timestamp", "release_timestamp"):
+        raw = entry.get(field)
+        if raw in (None, ""):
+            continue
+        try:
+            stamp = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if stamp > 10_000_000_000:
+            stamp //= 1000
+        try:
+            return datetime.fromtimestamp(stamp)
+        except (OSError, OverflowError, ValueError):
+            continue
+    for field in ("upload_date", "release_date"):
+        published = published_at_from_upload_date(entry.get(field))
+        if published:
+            return published
+    return None
+
+
+def select_newest_entry(entries) -> dict | None:
+    """Newest dated entry, or the playlist head when nothing is dated."""
+    usable = []
+    for entry in entries or []:
+        if not entry or not entry.get("id"):
+            continue
+        if not (entry.get("webpage_url") or entry.get("url")):
+            continue
+        usable.append(entry)
+    if not usable:
+        return None
+    dated = [entry for entry in usable if published_at_from_entry(entry) is not None]
+    if dated:
+        return max(dated, key=lambda entry: published_at_from_entry(entry))
+    return usable[0]
 
 
 def queued_newest_first(rows: list[dict]) -> list[dict]:
@@ -246,8 +298,67 @@ def scan_summary(
     if skipped_incomplete:
         parts.append(f"SKIPPED {skipped_incomplete}")
     if queued:
-        return " · ".join(parts)
-    return "NO NEW DOWNLOADS · " + " · ".join(parts)
+        summary = " · ".join(parts)
+    else:
+        summary = "NO NEW DOWNLOADS · " + " · ".join(parts)
+    return summary
+
+
+def with_newest_stamp(summary: str, published: datetime | None) -> str:
+    stamp = format_published(published)
+    if not stamp:
+        return summary
+    return f"{summary} · NEWEST {stamp}"
+
+
+async def resolve_newest_seen(
+    head: dict | None,
+    new_videos: list[dict],
+    inspected_ids: set[str],
+) -> dict | None:
+    """Id, title, and publish time of the newest playlist entry."""
+    if not head:
+        return None
+    external_id = str(head.get("id") or "")
+    url = head.get("webpage_url") or head.get("url") or ""
+    if not external_id or not url:
+        return None
+    title = title_from_entry(head, external_id)
+    published = published_at_from_entry(head)
+    row = next(
+        (item for item in new_videos if item.get("external_id") == external_id),
+        None,
+    )
+    if row and is_usable_video_title(row.get("title"), external_id):
+        title = row["title"]
+    if published is None and row:
+        published = published_at_from_upload_date(row.get("upload_date"))
+    if published is None and external_id not in inspected_ids:
+        meta = await resolve_video_metadata(
+            url,
+            title=title,
+            channel=(head.get("channel") or head.get("uploader") or ""),
+            upload_date=head.get("upload_date"),
+            external_id=external_id,
+        )
+        if not is_usable_video_title(title, external_id):
+            resolved = (meta.get("title") or "").strip()
+            if is_usable_video_title(resolved, external_id):
+                title = resolved
+        published = published_at_from_upload_date(meta.get("upload_date")) or published
+    return {"id": external_id, "title": title, "published": published}
+
+
+def apply_newest_seen(sub: Subscription, seen: dict | None) -> None:
+    if not seen or not seen.get("id"):
+        sub.newest_video_id = None
+        sub.newest_video_title = None
+        sub.newest_video_at = None
+        return
+    sub.newest_video_id = str(seen["id"])[:300]
+    title = (seen.get("title") or "").strip()
+    sub.newest_video_title = title[:1000] or None
+    sub.newest_video_at = seen.get("published")
 
 async def scan_subscription(subscription_id: int, initial: bool = False):
     with SessionLocal() as db:
@@ -417,6 +528,13 @@ async def scan_subscription(subscription_id: int, initial: bool = False):
         )
         db.commit()
 
+    head = select_newest_entry(entries)
+    inspected_ids = {
+        new_videos[index]["external_id"]
+        for index in inspect_indexes
+        if index < len(new_videos)
+    }
+
     for index in inspect_indexes:
         row = new_videos[index]
         meta = await resolve_video_metadata(
@@ -433,6 +551,9 @@ async def scan_subscription(subscription_id: int, initial: bool = False):
         if meta.get("upload_date"):
             row["upload_date"] = meta["upload_date"]
 
+    seen = await resolve_newest_seen(head, new_videos, inspected_ids)
+    result = with_newest_stamp(result, seen.get("published") if seen else None)
+
     with SessionLocal() as db:
         sub = db.get(Subscription, subscription_id)
         if not sub:
@@ -448,6 +569,7 @@ async def scan_subscription(subscription_id: int, initial: bool = False):
             row.pop("_recency", None)
             row.pop("_index", None)
             db.add(Video(**row))
+        apply_newest_seen(sub, seen)
         sub.last_scan_at = scan_at
         sub.last_error = None
         sub.last_scan_result = result

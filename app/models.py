@@ -15,6 +15,15 @@ from .db import Base
 def now():
     return datetime.now()
 
+
+def format_published(value: datetime | None) -> str:
+    """Date only when the source had no clock time."""
+    if value is None:
+        return ""
+    if (value.hour, value.minute, value.second) == (0, 0, 0):
+        return value.strftime("%d %b %Y")
+    return value.strftime("%d %b %Y, %H:%M")
+
 class Subscription(Base):
     __tablename__ = "subscriptions"
 
@@ -32,6 +41,9 @@ class Subscription(Base):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     title_is_custom: Mapped[bool] = mapped_column(Boolean, default=False)
     last_scan_result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    newest_video_id: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    newest_video_title: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    newest_video_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     retention_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     videos: Mapped[list["Video"]] = relationship(
@@ -46,6 +58,15 @@ class Subscription(Base):
         if title not in PLACEHOLDER_TITLES:
             return title
         return label_from_url(self.source_url)
+
+    def newest_video_line(self) -> str:
+        when = format_published(self.newest_video_at)
+        title = (self.newest_video_title or "").strip()
+        video_id = (self.newest_video_id or "").strip()
+        label = title or video_id
+        if when and label:
+            return f"{when} · {label}"
+        return when or label
 
     def has_custom_title(self) -> bool:
         from .ytdlp import PLACEHOLDER_TITLES, label_from_url
@@ -96,6 +117,11 @@ class Video(Base):
             upload_date=self.upload_date,
             external_id=self.external_id,
         )
+
+    def display_upload_date(self) -> str:
+        from .ytdlp import format_upload_date
+
+        return format_upload_date(self.upload_date)
 
 class AppState(Base):
     __tablename__ = "app_state"
