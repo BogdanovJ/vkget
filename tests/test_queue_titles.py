@@ -351,6 +351,10 @@ class ScanQueueTitleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(videos["-1_1"].display_title(), "Real queued lecture")
             self.assertEqual(videos["-1_2"].status, "IGNORED_INITIAL_HISTORY")
             self.assertEqual(videos["-1_2"].title, "-1_2")
+            sub = db.get(Subscription, sub_id)
+            self.assertEqual(sub.newest_video_id, "-1_1")
+            self.assertEqual(sub.newest_video_title, "Real queued lecture")
+            self.assertEqual(sub.newest_video_at, datetime(2024, 1, 15))
 
     async def test_scan_does_not_inspect_queued_human_title(self):
         with self.Session() as db:
@@ -378,7 +382,13 @@ class ScanQueueTitleTests(unittest.IsolatedAsyncioTestCase):
                 },
             ],
         }
-        inspect = AsyncMock(return_value={"title": "should not run"})
+        inspect = AsyncMock(
+            return_value={
+                "title": "should not replace",
+                "channel": "",
+                "upload_date": "20240302",
+            }
+        )
 
         with patch("app.scheduler.SessionLocal", self.Session), patch(
             "app.scheduler.inspect_playlist_flat",
@@ -388,11 +398,16 @@ class ScanQueueTitleTests(unittest.IsolatedAsyncioTestCase):
 
             await scan_subscription(sub_id, initial=True)
 
-        inspect.assert_not_called()
+        inspect.assert_awaited_once()
         with self.Session() as db:
             video = db.scalar(select(Video))
+            sub = db.get(Subscription, sub_id)
             self.assertEqual(video.title, "Already named")
             self.assertEqual(video.status, "QUEUED")
+            self.assertEqual(sub.newest_video_id, "-1_9")
+            self.assertEqual(sub.newest_video_title, "Already named")
+            self.assertEqual(sub.newest_video_at, datetime(2024, 3, 2))
+            self.assertIn("NEWEST 02 Mar 2024", sub.last_scan_result)
 
     async def test_undated_last_n_takes_playlist_head(self):
         with self.Session() as db:
@@ -420,27 +435,36 @@ class ScanQueueTitleTests(unittest.IsolatedAsyncioTestCase):
             ],
         }
 
+        inspect = AsyncMock(
+            return_value={
+                "title": "Newest",
+                "channel": "Algebra",
+                "upload_date": "20240601",
+            }
+        )
         with patch("app.scheduler.SessionLocal", self.Session), patch(
             "app.scheduler.inspect_playlist_flat",
             AsyncMock(return_value=playlist),
-        ), patch(
-            "app.scheduler.resolve_video_metadata",
-            new=AsyncMock(side_effect=AssertionError("should not inspect")),
-        ):
+        ), patch("app.scheduler.resolve_video_metadata", inspect):
             from app.scheduler import scan_subscription
 
             await scan_subscription(sub_id, initial=True)
 
+        inspect.assert_awaited_once()
+        self.assertEqual(inspect.await_args.args[0], "https://vk.com/video-1_new")
         with self.Session() as db:
             videos = {
                 v.external_id: v
                 for v in db.scalars(select(Video)).all()
             }
+            sub = db.get(Subscription, sub_id)
             self.assertEqual(videos["-1_new"].status, "QUEUED")
             self.assertEqual(videos["-1_mid"].status, "QUEUED")
             self.assertEqual(videos["-1_old"].status, "IGNORED_INITIAL_HISTORY")
             self.assertEqual(videos["-1_oldest"].status, "IGNORED_INITIAL_HISTORY")
             self.assertLess(videos["-1_new"].queue_rank, videos["-1_mid"].queue_rank)
+            self.assertEqual(sub.newest_video_title, "Newest")
+            self.assertEqual(sub.newest_video_at, datetime(2024, 6, 1))
 
     async def test_dated_last_n_uses_upload_dates(self):
         with self.Session() as db:
@@ -509,6 +533,99 @@ class ScanQueueTitleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(videos["-1_old"].status, "IGNORED_INITIAL_HISTORY")
             self.assertEqual(videos["-1_older"].status, "IGNORED_INITIAL_HISTORY")
             self.assertLess(videos["-1_new"].queue_rank, videos["-1_mid"].queue_rank)
+            sub = db.get(Subscription, sub_id)
+            self.assertEqual(sub.newest_video_id, "-1_new")
+            self.assertEqual(sub.newest_video_title, "New")
+            self.assertEqual(sub.newest_video_at, datetime(2024, 1, 1))
+            self.assertIn("NEWEST 01 Jan 2024", sub.last_scan_result)
+
+    async def test_known_undated_head_still_records_publish_time(self):
+        with self.Session() as db:
+            sub = Subscription(
+                source_url="https://vk.com/playlist/-1_2",
+                title="Algebra",
+                initial_last_n=1,
+                min_duration_seconds=0,
+                extra_stop_words="",
+                watch_future=True,
+                enabled=True,
+                next_scan_at=datetime.now(),
+            )
+            db.add(sub)
+            db.flush()
+            db.add(
+                Video(
+                    subscription_id=sub.id,
+                    source="vk",
+                    external_id="-1_known",
+                    webpage_url="https://vk.com/video-1_known",
+                    title="Already stored",
+                    channel="Algebra",
+                    status="COMPLETED",
+                )
+            )
+            db.commit()
+            sub_id = sub.id
+
+        playlist = {
+            "title": "Algebra",
+            "entries": [
+                {
+                    "id": "-1_known",
+                    "url": "https://vk.com/video-1_known",
+                    "title": "NA",
+                }
+            ],
+        }
+        inspect = AsyncMock(
+            return_value={
+                "title": "КСТАТИ #113",
+                "channel": "VK Видео",
+                "upload_date": "20260919",
+            }
+        )
+        with patch("app.scheduler.SessionLocal", self.Session), patch(
+            "app.scheduler.inspect_playlist_flat",
+            AsyncMock(return_value=playlist),
+        ), patch("app.scheduler.resolve_video_metadata", inspect):
+            from app.scheduler import scan_subscription
+
+            await scan_subscription(sub_id)
+
+        inspect.assert_awaited_once()
+        with self.Session() as db:
+            sub = db.get(Subscription, sub_id)
+            self.assertEqual(sub.newest_video_title, "КСТАТИ #113")
+            self.assertEqual(sub.newest_video_at, datetime(2026, 9, 19))
+            self.assertIn("NEWEST 19 Sep 2026", sub.last_scan_result)
+            self.assertIn("NO NEW VIDEOS", sub.last_scan_result)
+
+
+class PublishedStampTests(unittest.TestCase):
+    def test_unix_timestamp_keeps_clock_time(self):
+        from app.scheduler import published_at_from_entry
+
+        published = published_at_from_entry({"timestamp": 1789808400})
+        self.assertEqual(published, datetime.fromtimestamp(1789808400))
+
+    def test_line_joins_date_and_title(self):
+        sub = Subscription(
+            source_url="https://vk.com/playlist/-1_2",
+            title="Shows",
+            newest_video_id="-1_9",
+            newest_video_title="КСТАТИ #113",
+            newest_video_at=datetime(2026, 9, 19, 9, 0),
+        )
+        self.assertEqual(sub.newest_video_line(), "19 Sep 2026, 09:00 · КСТАТИ #113")
+
+    def test_date_only_omits_midnight(self):
+        sub = Subscription(
+            source_url="https://vk.com/playlist/-1_2",
+            title="Shows",
+            newest_video_title="New",
+            newest_video_at=datetime(2024, 1, 1),
+        )
+        self.assertEqual(sub.newest_video_line(), "01 Jan 2024 · New")
 
 
 if __name__ == "__main__":

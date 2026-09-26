@@ -28,6 +28,9 @@ class FakeSub:
     def display_title(self) -> str:
         return "Playlist"
 
+    def newest_video_line(self) -> str:
+        return ""
+
 
 class VkvideoFilterTests(unittest.TestCase):
     def test_filter_is_to_vkvideo(self):
@@ -79,6 +82,49 @@ class VkvideoFilterTests(unittest.TestCase):
         self.assertIn('rel="noopener"', html)
         self.assertIn('action="/subscriptions/1/delete"', html)
         self.assertIn("DELETE SUBSCRIPTION", html)
+        self.assertIn("NEWEST: UNKNOWN", html)
+
+    def test_catalogue_shows_upload_date(self):
+        video = Video(
+            title="КСТАТИ #113",
+            external_id="-220754053_456246718",
+            webpage_url="https://vk.com/video-220754053_456246718",
+            channel="VK Видео",
+            status="COMPLETED",
+            upload_date="20260919",
+            duration=6413,
+        )
+        html = templates.env.get_template("subscription.html").render(
+            sub=FakeSub(),
+            videos=[video],
+        )
+        self.assertIn("2026-09-19", html)
+        self.assertIn("КСТАТИ #113", html)
+
+    def test_lists_show_newest_video_stamp(self):
+        sub = FakeSub()
+        sub.newest_video_line = lambda: "19 Sep 2026, 09:00 · КСТАТИ #113"
+        home = templates.env.get_template("index.html").render(
+            counts={
+                "subscriptions": 1,
+                "queued": 0,
+                "downloading": 0,
+                "completed": 0,
+            },
+            recent=[],
+            subs=[sub],
+            next_scan={"when": "NONE", "title": None},
+            next_download={"when": "NONE", "title": None},
+            max_height=720,
+        )
+        listing = templates.env.get_template("subscriptions.html").render(subs=[sub])
+        detail = templates.env.get_template("subscription.html").render(
+            sub=sub,
+            videos=[],
+        )
+        self.assertIn("NEWEST VIDEO: 19 Sep 2026, 09:00 · КСТАТИ #113", home)
+        self.assertIn("NEWEST VIDEO: 19 Sep 2026, 09:00 · КСТАТИ #113", listing)
+        self.assertIn("NEWEST: 19 Sep 2026, 09:00 · КСТАТИ #113", detail)
 
 
 class FakeQueuedVideo:

@@ -72,6 +72,33 @@ def ensure_schema():
                 text("ALTER TABLE subscriptions ADD COLUMN last_scan_result TEXT NULL")
             )
         columns.add("last_scan_result")
+    if "newest_video_id" not in columns:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "ALTER TABLE subscriptions "
+                    "ADD COLUMN newest_video_id VARCHAR(300) NULL"
+                )
+            )
+        columns.add("newest_video_id")
+    if "newest_video_title" not in columns:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "ALTER TABLE subscriptions "
+                    "ADD COLUMN newest_video_title VARCHAR(1000) NULL"
+                )
+            )
+        columns.add("newest_video_title")
+    if "newest_video_at" not in columns:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "ALTER TABLE subscriptions "
+                    "ADD COLUMN newest_video_at DATETIME NULL"
+                )
+            )
+        columns.add("newest_video_at")
     if "retention_days" not in columns:
         with engine.begin() as conn:
             conn.execute(
