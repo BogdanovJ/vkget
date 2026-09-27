@@ -77,7 +77,7 @@
       <small>
         {% if v.display_upload_date() %}{{ v.display_upload_date() }} · {% endif %}
         {% if v.duration %}{{ (v.duration // 60) }}M {{ (v.duration % 60) }}S · {% endif %}
-        {{ v.status }}
+        {{ v.status|status }}
         {% if v.ignore_reason %} · {{ v.ignore_reason }}{% endif %}
       </small>
     </span>

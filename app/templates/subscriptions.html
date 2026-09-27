@@ -29,7 +29,7 @@
       <small>NEWEST VIDEO: {{ s.newest_video_line() }}</small>
       {% endif %}
       {% if s.last_scan_result %}
-      <small{% if s.last_scan_result.startswith("FAILED") %} class="error"{% endif %}>{{ s.last_scan_result }}</small>
+      <small{% if s.last_scan_result.startswith("FAILED") %} class="error"{% endif %}>{% if s.newest_video_line() %}{{ s.last_scan_result|scanline }}{% else %}{{ s.last_scan_result }}{% endif %}</small>
       {% endif %}
     </span>
     <em>{{ "ON" if s.enabled else "OFF" }}</em>
