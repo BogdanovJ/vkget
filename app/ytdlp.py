@@ -221,7 +221,7 @@ def composed_title(
     upload_date: str | None = None,
     external_id: str = "",
 ) -> str:
-    """Human name for UI and files. Untitled only when nothing else exists."""
+    """Human name for the UI. Untitled only when nothing else exists."""
     text = (title or "").strip()
     if is_usable_video_title(text, external_id):
         return text
@@ -248,12 +248,15 @@ def filename_title(
     channel: str = "",
     upload_date: str | None = None,
 ) -> str:
-    return composed_title(
-        title,
-        channel=channel,
-        upload_date=upload_date,
-        external_id=external_id,
-    )
+    """File title from yt-dlp's name. Never the channel."""
+    del channel, upload_date
+    text = (title or "").strip()
+    if is_usable_video_title(text, external_id):
+        return text
+    ext = str(external_id or "").strip()
+    if ext:
+        return f"Video {ext}"
+    return "Untitled"
 
 
 def format_upload_date(raw: str | None) -> str:
@@ -272,32 +275,49 @@ def download_stem(
     upload_date: str | None = None,
     channel: str = "",
 ) -> str:
+    """{title} [{id}]-{YYYY-MM-DD}. The date suffix is omitted when unknown."""
+    del channel
     date_part = format_upload_date(upload_date)
     name = safe_component(
-        filename_title(
-            title,
-            video_id,
-            channel=channel,
-            upload_date=upload_date,
-        ),
+        filename_title(title, video_id),
         default="Untitled",
     )
     vid = safe_component(video_id or "id", default="id")[:80]
+    suffix = f" [{vid}]"
     if date_part:
-        stem = f"{date_part} - {name} [{vid}]"
-    else:
-        stem = f"{name} [{vid}]"
+        suffix = f"{suffix}-{date_part}"
     max_stem = 251
-    extra = len(stem) - len(name)
-    if extra < 0:
-        extra = 0
-    if len(stem) > max_stem:
-        name = name[: max(16, max_stem - extra)].rstrip(" .") or "Untitled"
-        if date_part:
-            stem = f"{date_part} - {name} [{vid}]"
-        else:
-            stem = f"{name} [{vid}]"
-    return stem[:max_stem]
+    room = max_stem - len(suffix)
+    if len(name) > room:
+        name = name[: max(16, room)].rstrip(" .") or "Untitled"
+    return f"{name}{suffix}"[:max_stem]
+
+
+def dated_filename(path: str, video_id: str) -> bool:
+    """True when the file is already `{title} [{id}]-{YYYY-MM-DD}.ext`."""
+    vid = safe_component(video_id or "", default="")
+    if not vid:
+        return False
+    name = Path(path or "").name
+    return bool(
+        re.search(
+            rf" \[{re.escape(vid)}\]-\d{{4}}-\d{{2}}-\d{{2}}\.[^.]+$",
+            name,
+        )
+    )
+
+
+def _download_dir(folder: str) -> Path:
+    dir_name = safe_component(folder, default="_single")
+    if not is_usable_folder(dir_name):
+        dir_name = "_single"
+    return Path(settings.download_root) / dir_name
+
+
+def build_partial_output(*, folder: str, video_id: str) -> Path:
+    """Stable in-progress name so retries find the same partial."""
+    vid = safe_component(video_id or "id", default="id")[:80]
+    return _download_dir(folder) / f"[{vid}].%(ext)s"
 
 
 def build_download_output(
@@ -308,11 +328,8 @@ def build_download_output(
     upload_date: str | None = None,
     channel: str = "",
 ) -> Path:
-    dir_name = safe_component(folder, default="_single")
-    if not is_usable_folder(dir_name):
-        dir_name = "_single"
     stem = download_stem(title, video_id, upload_date, channel=channel)
-    return Path(settings.download_root) / dir_name / f"{stem}.%(ext)s"
+    return _download_dir(folder) / f"{stem}.%(ext)s"
 
 
 _NO_DATA_BLOCKS = "did not get any data blocks"
@@ -367,6 +384,73 @@ def remove_stale_download_parts(output: str, *, force: bool = False) -> list[str
 
 def looks_like_no_data_blocks(log: str | None) -> bool:
     return _NO_DATA_BLOCKS in (log or "").lower()
+
+
+_META_MARK = "vkget_meta:"
+_PATH_MARK = "vkget_path:"
+
+
+def parse_download_marks(text: str) -> tuple[str | None, dict[str, str]]:
+    """Read title, date, id, and filepath from marked yt-dlp --print lines."""
+    path = None
+    meta: dict[str, str] = {}
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith(_PATH_MARK):
+            found = stripped[len(_PATH_MARK) :].strip()
+            if found:
+                path = found
+            continue
+        if not stripped.startswith(_META_MARK):
+            continue
+        payload = stripped[len(_META_MARK) :]
+        if "\t" not in payload:
+            continue
+        upload_date, rest = payload.split("\t", 1)
+        if "\t" not in rest:
+            continue
+        title, video_id = rest.rsplit("\t", 1)
+        meta = {
+            "upload_date": upload_date.strip(),
+            "title": title.replace("\n", " ").strip(),
+            "id": video_id.strip(),
+        }
+    return path, meta
+
+
+def place_downloaded_file(
+    src: str,
+    *,
+    title: str,
+    video_id: str,
+    upload_date: str | None = None,
+) -> str:
+    """Move a finished download to `{title} [{id}]-{YYYY-MM-DD}.ext`."""
+    source = Path(src or "")
+    if not source.name:
+        return src
+    suffix = source.suffix or ".mp4"
+    dest = source.with_name(download_stem(title, video_id, upload_date) + suffix)
+    if not source.is_file():
+        return str(dest)
+    if dest.resolve() == source.resolve():
+        return str(source)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    source.replace(dest)
+    return str(dest)
+
+
+def path_inside_root(path: str, root: str) -> bool:
+    candidate = Path(path or "")
+    if not candidate.is_absolute() or candidate.is_symlink():
+        return False
+    try:
+        root_resolved = Path(root).resolve()
+        resolved = candidate.resolve()
+        resolved.relative_to(root_resolved)
+    except (OSError, ValueError):
+        return False
+    return resolved != root_resolved and candidate.is_file()
 
 
 _ENTRY_TITLE_KEYS = (
@@ -1237,7 +1321,8 @@ async def _download_once(
             "--part",
             "--no-overwrites",
             "--newline",
-            "--print", "after_move:filepath",
+            "--print", "after_move:vkget_path:%(filepath)s",
+            "--print", "after_move:vkget_meta:%(upload_date)s\t%(title)s\t%(id)s",
             "--output", output,
             url,
         ]
@@ -1248,8 +1333,11 @@ async def _download_once(
             min_rate_bps=min_rate,
             slow_rate_duration=slow_for,
         )
+        printed, _meta = parse_download_marks(out)
         lines = [x.strip() for x in out.splitlines() if x.strip()]
-        final_path = lines[-1] if lines and rc == 0 else None
+        final_path = printed or (lines[-1] if lines and rc == 0 else None)
+        if final_path and final_path.startswith("vkget_"):
+            final_path = None
         return rc, final_path, (err + "\n" + out).strip()
     finally:
         if cleanup:
@@ -1268,16 +1356,11 @@ async def download_video(
     folder: str | None = None,
     proxy: str | None = None,
 ):
-    output_path = build_download_output(
-        folder=download_folder_name(
-            subscription_title=folder or "",
-            channel=channel,
-        ),
-        title=title,
-        video_id=video_id,
-        upload_date=upload_date,
+    folder_name = download_folder_name(
+        subscription_title=folder or "",
         channel=channel,
     )
+    output_path = build_partial_output(folder=folder_name, video_id=video_id)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output = str(output_path)
     fmt = download_format(settings.max_height)
@@ -1296,10 +1379,18 @@ async def download_video(
     async def _finish(rc, final_path, log):
         if rc != 0:
             return rc, final_path, log
+        printed, meta = parse_download_marks(log)
+        used = printed or final_path or ""
+        named = place_downloaded_file(
+            used,
+            title=(meta.get("title") or title),
+            video_id=(meta.get("id") or video_id),
+            upload_date=(meta.get("upload_date") or upload_date),
+        )
         try:
-            tv_path = await ensure_tv_compatible(final_path or "", force_remux=False)
+            tv_path = await ensure_tv_compatible(named or "", force_remux=False)
         except Exception as exc:
-            return 1, final_path, f"{log}\nTV compatible encode failed: {exc}".strip()
+            return 1, named or final_path, f"{log}\nTV compatible encode failed: {exc}".strip()
         return rc, tv_path, log
 
     async def _attempt(candidate: str, extra_cookies=None, user_agent=None):

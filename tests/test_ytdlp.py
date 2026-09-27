@@ -11,22 +11,21 @@ from pathlib import Path
 from app.ytdlp import (
     _netscape_cookie_line,
     build_download_output,
+    dated_filename,
     download_folder_name,
     download_format,
     download_stem,
     download_url_candidates,
     ffmpeg_tv_args,
     format_upload_date,
-    is_library_media_path,
     is_tv_ready,
-    iter_library_media,
     label_from_url,
     looks_like_bot_protection,
     looks_like_no_data_blocks,
     mirror_url,
     normalize_vk_url,
+    parse_download_marks,
     remove_stale_download_parts,
-    reset_library_tv_failures,
     scan_url_candidates,
     to_vk_com,
     to_vkvideo,
@@ -385,7 +384,7 @@ class FlareSolverrTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(rc, 0)
-        self.assertEqual(path, "/downloads/x.mp4")
+        self.assertTrue(path.endswith("Hello [1_2]-2024-01-02.mp4"))
         self.assertEqual(
             calls,
             ["https://vk.com/video-1_2", "https://vkvideo.ru/video-1_2"],
@@ -404,7 +403,7 @@ class DownloadPathTests(unittest.TestCase):
         self.assertEqual(path.parent.name, "Algebra")
         self.assertEqual(
             path.name,
-            "2024-01-15 - Lecture 4 — Linear maps [-214484275_456239461].%(ext)s",
+            "Lecture 4 — Linear maps [-214484275_456239461]-2024-01-15.%(ext)s",
         )
 
     def test_placeholders_never_become_folders_or_na_dates(self):
@@ -437,8 +436,9 @@ class DownloadPathTests(unittest.TestCase):
         )
         self.assertEqual(
             dated.name,
-            "2024-01-15 - Algebra · 2024-01-15 [-1_2].%(ext)s",
+            "Video -1_2 [-1_2]-2024-01-15.%(ext)s",
         )
+        self.assertNotIn("Algebra", dated.name)
 
     def test_playlist_id_subscription_name_is_a_valid_folder(self):
         self.assertEqual(
@@ -460,8 +460,33 @@ class DownloadPathTests(unittest.TestCase):
     def test_long_filename_stays_under_limit(self):
         stem = download_stem("A" * 400, "-1_2", "20240115")
         self.assertLessEqual(len(stem) + len(".mp4"), 255)
-        self.assertIn("[-1_2]", stem)
-        self.assertTrue(stem.startswith("2024-01-15 - "))
+        self.assertTrue(stem.endswith("[-1_2]-2024-01-15"))
+
+    def test_dated_filename_requires_trailing_date(self):
+        self.assertTrue(
+            dated_filename(
+                "/downloads/Algebra/Lecture 4 — Linear maps [-1_2]-2024-01-15.mp4",
+                "-1_2",
+            )
+        )
+        self.assertFalse(dated_filename("/downloads/Algebra/Algebra.mp4", "-1_2"))
+        self.assertFalse(
+            dated_filename(
+                "/downloads/Algebra/2024-01-15 - Algebra [-1_2].mp4",
+                "-1_2",
+            )
+        )
+
+    def test_marks_keep_title_between_tabs(self):
+        path, meta = parse_download_marks(
+            "progress\n"
+            "vkget_path:/downloads/Algebra/[-1_2].mp4\n"
+            "vkget_meta:20240115\tLecture 4 — Linear maps\t-1_2\n"
+        )
+        self.assertEqual(path, "/downloads/Algebra/[-1_2].mp4")
+        self.assertEqual(meta["upload_date"], "20240115")
+        self.assertEqual(meta["title"], "Lecture 4 — Linear maps")
+        self.assertEqual(meta["id"], "-1_2")
 
 
 class DownloadOutputWireTests(unittest.IsolatedAsyncioTestCase):
@@ -496,9 +521,51 @@ class DownloadOutputWireTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(len(outputs), 1)
         self.assertIn("/Algebra course/", outputs[0])
-        self.assertIn("2024-01-15 - Lecture 4 [-1_2].%(ext)s", outputs[0])
+        self.assertIn("[-1_2].%(ext)s", outputs[0])
+        self.assertNotIn("Lecture 4", outputs[0])
         self.assertNotIn("/VK Uploader/", outputs[0])
-        self.assertTrue(path.endswith("2024-01-15 - Lecture 4 [-1_2].mp4"))
+        self.assertTrue(path.endswith("Lecture 4 [-1_2]-2024-01-15.mp4"))
+
+    async def test_ytdlp_marks_name_the_file_not_the_channel(self):
+        async def fake_once(url, output, fmt, extra_cookies=None, user_agent=None, proxy=None):
+            partial = output.replace("%(ext)s", "mp4")
+            Path(partial).write_bytes(b"video")
+            log = (
+                f"vkget_path:{partial}\n"
+                "vkget_meta:20240115\tLecture 4 — Linear maps\t-1_2\n"
+            )
+            return 0, partial, log
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "app.ytdlp.settings"
+        ) as fake_settings, patch(
+            "app.ytdlp._download_once", side_effect=fake_once
+        ), patch(
+            "app.ytdlp.ensure_tv_compatible",
+            new=AsyncMock(side_effect=lambda path, force_remux=False: path),
+        ):
+            fake_settings.flaresolverr_url = ""
+            fake_settings.download_root = tmp
+            fake_settings.max_height = 720
+            fake_settings.download_rate = "500K"
+            fake_settings.cookie_file = "/missing"
+            from app.ytdlp import download_video
+
+            rc, path, log = await download_video(
+                "https://vk.com/video-1_2",
+                "Algebra",
+                title="NA",
+                video_id="-1_2",
+                upload_date="NA",
+                folder="Algebra",
+            )
+            partial = Path(tmp) / "Algebra" / "[-1_2].mp4"
+
+            self.assertEqual(rc, 0)
+            self.assertTrue(path.endswith("Lecture 4 — Linear maps [-1_2]-2024-01-15.mp4"))
+            self.assertTrue(os.path.isfile(path))
+            self.assertFalse(partial.exists())
+            self.assertNotIn("Algebra [-1_2]", path)
 
 
 class StalePartialDownloadTests(unittest.TestCase):
@@ -552,7 +619,7 @@ class NoDataBlocksRetryTests(unittest.IsolatedAsyncioTestCase):
             "app.ytdlp._download_once", side_effect=fake_once
         ), patch(
             "app.ytdlp.ensure_tv_compatible",
-            new=AsyncMock(side_effect=lambda path: path),
+            new=AsyncMock(side_effect=lambda path, **kwargs: path),
         ):
             fake_settings.flaresolverr_url = ""
             fake_settings.download_root = tmp
@@ -571,7 +638,7 @@ class NoDataBlocksRetryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(rc, 0)
         self.assertEqual(calls, ["https://vk.com/video-1_2", "https://vk.com/video-1_2"])
-        self.assertTrue(path.endswith("Talk [-1_2].mp4"))
+        self.assertTrue(path.endswith("Talk [-1_2]-2024-01-15.mp4"))
 
     async def test_does_not_retry_unrelated_errors(self):
         calls: list[str] = []
@@ -678,6 +745,8 @@ class TvCompatibleTests(unittest.TestCase):
 
     def test_library_paths_skip_temps_and_hidden(self):
         from pathlib import Path
+
+        from app.ytdlp import is_library_media_path
 
         self.assertTrue(is_library_media_path(Path("/downloads/show/talk.mp4")))
         self.assertTrue(is_library_media_path(Path("/downloads/show/talk.webm")))
@@ -790,8 +859,10 @@ class TvCompatibleEncodeTests(unittest.IsolatedAsyncioTestCase):
             )
             from app.ytdlp import (
                 ensure_tv_compatible,
+                iter_library_media,
                 next_library_tv_rewrite,
                 probe_media,
+                reset_library_tv_failures,
             )
 
             reset_library_tv_failures()
@@ -805,6 +876,150 @@ class TvCompatibleEncodeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(found, [bad, good])
             picked = await next_library_tv_rewrite(tmp)
             self.assertEqual(picked, bad)
+
+
+class IdleRenameTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        from app.db import Base
+        from app.scheduler import _rename_settled
+
+        fd, self.db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        self.root = Path(tempfile.mkdtemp())
+        (self.root / ".vkget-share").write_text("ok\n")
+        self.outside = Path(tempfile.mkdtemp())
+        self.engine = create_engine(f"sqlite:///{self.db_path}")
+        Base.metadata.create_all(self.engine)
+        self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
+        _rename_settled.clear()
+
+    def tearDown(self):
+        from app.scheduler import _rename_settled
+
+        _rename_settled.clear()
+        self.engine.dispose()
+        os.unlink(self.db_path)
+        for folder in (self.root, self.outside):
+            for path in sorted(folder.rglob("*"), reverse=True):
+                if path.is_symlink() or path.is_file():
+                    path.unlink()
+                elif path.is_dir():
+                    path.rmdir()
+            folder.rmdir()
+
+    def _video(self, db, *, external_id, name, folder, title="Algebra", upload_date=None):
+        from app.models import Video
+
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / name
+        target.write_text("video")
+        video = Video(
+            source="vk",
+            external_id=external_id,
+            webpage_url=f"https://vk.com/video{external_id}",
+            title=title,
+            channel="Algebra",
+            upload_date=upload_date,
+            status="COMPLETED",
+            local_path=str(target),
+        )
+        db.add(video)
+        db.commit()
+        return video
+
+    async def test_renames_one_channel_only_file_per_idle_pass(self):
+        from app.scheduler import rename_one_completed_file
+
+        with self.Session() as db:
+            dated = self._video(
+                db,
+                external_id="-1_9",
+                name="Lecture 4 — Linear maps [-1_9]-2024-01-15.mp4",
+                folder=self.root / "Algebra",
+                title="Lecture 4 — Linear maps",
+                upload_date="20240115",
+            )
+            outside = self._video(
+                db,
+                external_id="-1_8",
+                name="Algebra.mp4",
+                folder=self.outside,
+            )
+            first = self._video(
+                db,
+                external_id="-1_2",
+                name="Algebra.mp4",
+                folder=self.root / "Algebra",
+            )
+            second = self._video(
+                db,
+                external_id="-1_3",
+                name="Channel only.mp4",
+                folder=self.root / "Algebra",
+            )
+            dated_path = dated.local_path
+            outside_path = outside.local_path
+            first_id = first.id
+            second_id = second.id
+
+        calls: list[str] = []
+
+        async def fake_resolve(url, *, title="", channel="", upload_date=None, external_id=""):
+            calls.append(url)
+            self.assertEqual(channel, "")
+            return {
+                "title": "Lecture 4 — Linear maps",
+                "channel": "Algebra",
+                "upload_date": "20240115",
+            }
+
+        with patch("app.scheduler.SessionLocal", self.Session), patch(
+            "app.scheduler.settings"
+        ) as fake_settings, patch(
+            "app.scheduler.resolve_video_metadata",
+            side_effect=fake_resolve,
+        ):
+            fake_settings.download_root = str(self.root)
+            renamed = await rename_one_completed_file()
+            with self.Session() as db:
+                from app.models import Video
+
+                mid = db.get(Video, second_id)
+                self.assertTrue(mid.local_path.endswith("Channel only.mp4"))
+                self.assertTrue(os.path.isfile(mid.local_path))
+            again = await rename_one_completed_file()
+
+        expected = "Lecture 4 — Linear maps [-1_2]-2024-01-15.mp4"
+        self.assertTrue(renamed)
+        self.assertTrue(again)
+        self.assertEqual(
+            calls,
+            [
+                "https://vk.com/video-1_2",
+                "https://vk.com/video-1_3",
+            ],
+        )
+        self.assertTrue(os.path.isfile(dated_path))
+        self.assertTrue(os.path.isfile(outside_path))
+        self.assertFalse((self.root / "Algebra" / "Algebra.mp4").exists())
+        with self.Session() as db:
+            from app.models import Video
+
+            first_row = db.get(Video, first_id)
+            second_row = db.get(Video, second_id)
+            self.assertTrue(first_row.local_path.endswith(expected))
+            self.assertTrue(os.path.isfile(first_row.local_path))
+            self.assertEqual(first_row.title, "Algebra")
+            self.assertTrue(
+                second_row.local_path.endswith(
+                    "Lecture 4 — Linear maps [-1_3]-2024-01-15.mp4"
+                )
+            )
+            self.assertTrue(os.path.isfile(second_row.local_path))
+            self.assertEqual(second_row.title, "Algebra")
 
 
 def _norm_test_profile(value) -> str:
