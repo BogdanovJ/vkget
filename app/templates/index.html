@@ -79,7 +79,7 @@
           <small>NEWEST VIDEO: {{ s.newest_video_line() }}</small>
           {% endif %}
           {% if s.last_scan_result %}
-          <small{% if s.last_scan_result.startswith("FAILED") %} class="error"{% endif %}>{{ s.last_scan_result }}</small>
+          <small{% if s.last_scan_result.startswith("FAILED") %} class="error"{% endif %}>{% if s.newest_video_line() %}{{ s.last_scan_result|scanline }}{% else %}{{ s.last_scan_result }}{% endif %}</small>
           {% endif %}
         </span>
         <small>{{ "ON" if s.enabled else "OFF" }}</small>
@@ -95,9 +95,10 @@
       <div class="row">
         <span>
           <strong>{{ v.display_title() }}</strong>
-          <small>{{ v.channel }}</small>
+          {% set channel = v.channel|channel %}
+          {% if channel %}<small>{{ channel }}</small>{% endif %}
         </span>
-        <em class="status">{{ v.status }}</em>
+        <em class="status">{{ v.status|status }}</em>
       </div>
     {% else %}
       <p class="muted">NOTHING DISCOVERED YET.</p>
