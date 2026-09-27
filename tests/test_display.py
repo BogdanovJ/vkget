@@ -126,6 +126,55 @@ class VkvideoFilterTests(unittest.TestCase):
         self.assertIn("NEWEST VIDEO: 19 Sep 2026, 09:00 · КСТАТИ #113", listing)
         self.assertIn("NEWEST: 19 Sep 2026, 09:00 · КСТАТИ #113", detail)
 
+    def test_lists_drop_repeated_newest_stamp_from_scan_line(self):
+        sub = FakeSub()
+        sub.newest_video_line = lambda: "19 Sep 2026, 09:00 · КСТАТИ #113"
+        sub.last_scan_result = "NO NEW VIDEOS · 114 already known · NEWEST 19 Sep 2026"
+        home = templates.env.get_template("index.html").render(
+            counts={
+                "subscriptions": 1,
+                "queued": 0,
+                "downloading": 0,
+                "completed": 0,
+            },
+            recent=[],
+            subs=[sub],
+            next_scan={"when": "NONE", "title": None},
+            next_download={"when": "NONE", "title": None},
+            max_height=720,
+        )
+        listing = templates.env.get_template("subscriptions.html").render(subs=[sub])
+        self.assertIn("NO NEW VIDEOS · 114 already known", home)
+        self.assertNotIn("NEWEST 19 Sep 2026", home)
+        self.assertIn("NO NEW VIDEOS · 114 already known", listing)
+        self.assertNotIn("NEWEST 19 Sep 2026", listing)
+
+    def test_recent_hides_placeholder_channel_and_shortens_status(self):
+        video = Video(
+            title="NA",
+            external_id="-220754053_456246683",
+            webpage_url="https://vk.com/video-220754053_456246683",
+            channel="Subscription",
+            status="IGNORED_INITIAL_HISTORY",
+        )
+        html = templates.env.get_template("index.html").render(
+            counts={
+                "subscriptions": 0,
+                "queued": 0,
+                "downloading": 0,
+                "completed": 0,
+            },
+            recent=[video],
+            subs=[],
+            next_scan={"when": "NONE", "title": None},
+            next_download={"when": "NONE", "title": None},
+            max_height=720,
+        )
+        self.assertIn("Video -220754053_456246683", html)
+        self.assertIn(">HISTORY<", html)
+        self.assertNotIn("IGNORED_INITIAL_HISTORY", html)
+        self.assertNotIn(">Subscription<", html)
+
 
 class FakeQueuedVideo:
     channel = "Algebra"

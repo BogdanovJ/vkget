@@ -13,7 +13,15 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .db import ensure_schema, get_db, wait_for_database
-from .models import AppState, Subscription, Video, VpnProfile
+from .models import (
+    AppState,
+    Subscription,
+    Video,
+    VpnProfile,
+    scan_result_line,
+    shown_channel,
+    status_label,
+)
 from .retention import (
     describe_retention,
     get_common_retention_days,
@@ -94,6 +102,9 @@ templates.env.filters["stamp"] = format_stamp
 templates.env.filters["when"] = format_when
 templates.env.filters["vkvideo"] = to_vkvideo
 templates.env.filters["ago"] = format_ago
+templates.env.filters["status"] = status_label
+templates.env.filters["channel"] = shown_channel
+templates.env.filters["scanline"] = scan_result_line
 
 @app.on_event("startup")
 async def startup():

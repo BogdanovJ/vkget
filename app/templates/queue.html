@@ -35,14 +35,14 @@
     <span>
       <strong>{{ v.display_title() }}</strong>
       <small>
-        {{ v.channel }} · ATTEMPT {{ v.attempts }} · NEXT {{ v.next_attempt_at or "NOW" }}
+        {% set channel = v.channel|channel %}{% if channel %}{{ channel }} · {% endif %}ATTEMPT {{ v.attempts }} · NEXT {{ v.next_attempt_at or "NOW" }}
       </small>
       {% if v.last_error %}
       <small class="error">{{ v.last_error[-180:] }}</small>
       {% endif %}
     </span>
     <span class="actions">
-      <em class="status">{{ v.status }}</em>
+      <em class="status">{{ v.status|status }}</em>
       {% if v.status != "DOWNLOADING" %}
         {% if not loop.first %}
         <form method="post" action="/queue/videos/{{ v.id }}/up">

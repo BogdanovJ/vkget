@@ -24,6 +24,40 @@ def format_published(value: datetime | None) -> str:
         return value.strftime("%d %b %Y")
     return value.strftime("%d %b %Y, %H:%M")
 
+
+_STATUS_LABELS = {
+    "COMPLETED": "DONE",
+    "DOWNLOADING": "ACTIVE",
+    "FAILED_TEMPORARY": "RETRY",
+    "IGNORED_INITIAL_HISTORY": "HISTORY",
+    "IGNORED_FILTER": "FILTERED",
+    "IGNORED_MANUAL": "IGNORED",
+    "EXPIRED": "EXPIRED",
+}
+
+
+def status_label(status: str | None) -> str:
+    """Short badge text. Stored statuses stay unchanged."""
+    text = (status or "").strip()
+    return _STATUS_LABELS.get(text, text)
+
+
+def shown_channel(name: str | None) -> str:
+    """Hide scan leftovers such as Subscription, Unknown, and NA."""
+    from .ytdlp import is_usable_channel
+
+    text = (name or "").strip()
+    return text if is_usable_channel(text) else ""
+
+
+def scan_result_line(value: str | None) -> str:
+    """Drop the repeated newest-date suffix. The newest line already shows it."""
+    text = value or ""
+    marker = " · NEWEST "
+    if marker in text:
+        return text.split(marker, 1)[0]
+    return text
+
 class Subscription(Base):
     __tablename__ = "subscriptions"
 
