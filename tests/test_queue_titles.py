@@ -154,8 +154,9 @@ class UsableTitleTests(unittest.TestCase):
         )
         self.assertEqual(
             dated.name,
-            "2024-01-15 - Algebra · 2024-01-15 [-1_2].%(ext)s",
+            "Video -1_2 [-1_2]-2024-01-15.%(ext)s",
         )
+        self.assertNotIn("Algebra", dated.name)
 
 
 class ResolveTitleTests(unittest.IsolatedAsyncioTestCase):

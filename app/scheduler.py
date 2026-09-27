@@ -18,6 +18,7 @@ from .retention import apply_retention
 from .vpn.runtime import download_with_vpn
 from .ytdlp import (
     PLACEHOLDER_TITLES,
+    dated_filename,
     download_folder_name,
     download_video,
     format_upload_date,
@@ -25,6 +26,8 @@ from .ytdlp import (
     is_usable_channel,
     is_usable_video_title,
     label_from_url,
+    path_inside_root,
+    place_downloaded_file,
     resolve_video_metadata,
     title_from_entry,
 )
@@ -836,6 +839,76 @@ async def run_one_download() -> bool:
 
 
 
+_rename_settled: set[int] = set()
+
+
+async def rename_one_completed_file() -> bool:
+    """Rename one tracked file that is missing `{title} [{id}]-{date}`."""
+    if not storage_ok():
+        return False
+    root = settings.download_root
+    with SessionLocal() as db:
+        jobs = db.scalars(
+            select(Video)
+            .where(
+                Video.status == "COMPLETED",
+                Video.local_path.is_not(None),
+            )
+            .order_by(Video.id.asc())
+        ).all()
+        target = None
+        for job in jobs:
+            if job.id in _rename_settled:
+                continue
+            local = job.local_path or ""
+            if dated_filename(local, job.external_id):
+                _rename_settled.add(job.id)
+                continue
+            if not path_inside_root(local, root):
+                _rename_settled.add(job.id)
+                continue
+            target = (
+                job.id,
+                job.webpage_url,
+                job.external_id,
+                job.title,
+                job.upload_date,
+                local,
+            )
+            break
+    if not target:
+        return False
+
+    video_pk, url, external_id, title, upload_date, local = target
+    # Omit channel so a stored channel name cannot skip the yt-dlp extract.
+    meta = await resolve_video_metadata(
+        url,
+        title=title,
+        channel="",
+        upload_date=upload_date,
+        external_id=external_id,
+    )
+    new_path = place_downloaded_file(
+        local,
+        title=meta.get("title") or title,
+        video_id=external_id,
+        upload_date=meta.get("upload_date") or upload_date,
+    )
+    if new_path == local or not os.path.isfile(new_path):
+        _rename_settled.add(video_pk)
+        return False
+
+    with SessionLocal() as db:
+        job = db.get(Video, video_pk)
+        if not job or job.status != "COMPLETED" or job.local_path != local:
+            _rename_settled.add(video_pk)
+            return False
+        job.local_path = new_path
+        db.commit()
+    _rename_settled.add(video_pk)
+    return True
+
+
 async def scheduler_loop():
     delay = SCHEDULER_SLEEP_SECONDS
     while True:
@@ -858,7 +931,9 @@ async def scheduler_loop():
                 await scan_subscription(sub_id)
 
             await resolve_placeholder_queued_titles()
-            await run_one_download()
+            downloaded = await run_one_download()
+            if not downloaded:
+                await rename_one_completed_file()
             with SessionLocal() as db:
                 apply_retention(db)
             delay = SCHEDULER_SLEEP_SECONDS
