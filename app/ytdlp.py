@@ -186,11 +186,17 @@ def is_usable_video_title(title: str | None, external_id: str = "") -> bool:
     return True
 
 
+def _is_reserved_name(text: str) -> bool:
+    """Placeholder labels, including the last-resort `_single` folder token."""
+    lowered = text.casefold()
+    return lowered in _UNUSABLE_VIDEO_TITLES or lowered == "_single"
+
+
 def is_usable_channel(name: str | None) -> bool:
     text = (name or "").strip()
     if not text:
         return False
-    if text.casefold() in _UNUSABLE_VIDEO_TITLES:
+    if _is_reserved_name(text):
         return False
     if _VK_ID_RE.fullmatch(text) or _VK_SLUG_RE.fullmatch(text):
         return False
@@ -202,7 +208,7 @@ def is_usable_folder(name: str | None) -> bool:
     text = (name or "").strip()
     if not text or text in {".", ".."}:
         return False
-    return text.casefold() not in _UNUSABLE_VIDEO_TITLES
+    return not _is_reserved_name(text)
 
 
 def download_folder_name(*, subscription_title: str = "", channel: str = "") -> str:
@@ -354,31 +360,133 @@ def iter_download_artifacts(output: str):
             yield path
 
 
+_FRAGMENT_RE = re.compile(r"\.f\d+\.", re.I)
+_ID_IN_BRACKETS_RE = re.compile(r"\[(-?\d+_\d+)\]")
+_MEDIA_SUFFIXES = _EMPTY_MEDIA_SUFFIXES | {".mov", ".m4v"}
+
+
 def is_partial_download(path: Path) -> bool:
+    """yt-dlp temps: .part, .ytdl, fragment files, and .part-Frag pieces."""
     name = path.name.lower()
-    return name.endswith(".part") or name.endswith(".ytdl") or ".part." in name
+    if name.endswith(".part") or name.endswith(".ytdl") or ".part" in name:
+        return True
+    return bool(_FRAGMENT_RE.search(name))
+
+
+def _unlink_file(path: Path) -> bool:
+    try:
+        path.unlink()
+    except OSError:
+        return False
+    return True
 
 
 def remove_stale_download_parts(output: str, *, force: bool = False) -> list[str]:
-    """Delete leftover yt-dlp temps that make --continue resume a dead download."""
-    removed: list[str] = []
+    """Delete leftover yt-dlp temps that make --continue resume a dead download.
+
+    A partial set is kept together when any member is large enough to resume,
+    including a small .ytdl sidecar. force=True drops the whole set.
+    """
+    partials: list[tuple[Path, int]] = []
+    empties: list[Path] = []
     for path in iter_download_artifacts(output):
         try:
             size = path.stat().st_size
         except OSError:
             continue
-        drop = False
-        if is_partial_download(path) and (force or size < _TINY_PART_BYTES):
-            drop = True
+        if is_partial_download(path):
+            partials.append((path, size))
         elif size == 0 and path.suffix.lower() in _EMPTY_MEDIA_SUFFIXES:
-            drop = True
-        if not drop:
+            empties.append(path)
+    removed: list[str] = []
+    drop_partials = bool(partials) and (
+        force or all(size < _TINY_PART_BYTES for _path, size in partials)
+    )
+    if drop_partials:
+        for path, _size in partials:
+            if _unlink_file(path):
+                removed.append(str(path))
+    for path in empties:
+        if _unlink_file(path):
+            removed.append(str(path))
+    return removed
+
+
+def partial_video_id(name: str) -> str | None:
+    match = _ID_IN_BRACKETS_RE.search(name or "")
+    if not match:
+        return None
+    return match.group(1)
+
+
+def _partial_media_base(name: str) -> str:
+    lower = name.lower()
+    if lower.endswith(".part"):
+        base = name[: -len(".part")]
+    elif lower.endswith(".ytdl"):
+        base = name[: -len(".ytdl")]
+    elif ".part" in lower:
+        base = name[: lower.index(".part")]
+    else:
+        base = name
+    match = _FRAGMENT_RE.search(base)
+    if match:
+        base = base[: match.start()]
+    return base
+
+
+def _has_finished_sibling(path: Path) -> bool:
+    """True when a real media file sits beside this temp and shares its stem."""
+    base = _partial_media_base(path.name)
+    if not base or base == path.name:
+        return False
+    parent = path.parent
+    candidates = [parent / base]
+    if Path(base).suffix.lower() not in _MEDIA_SUFFIXES:
+        candidates.extend(parent / f"{base}{ext}" for ext in _EMPTY_MEDIA_SUFFIXES)
+    for candidate in candidates:
+        if candidate == path or not is_saved_media(candidate):
+            continue
+        return True
+    return False
+
+
+def remove_orphan_partials(root: str, protected_ids: set[str]) -> list[str]:
+    """Delete leftover temps that are not an active or retryable download.
+
+    protected_ids are catalogue ids still queued, paused, failed, or downloading.
+    A .part with no video id is removed only when a finished file with the same
+    stem is already beside it.
+    """
+    root_path = Path(root or "")
+    if not root_path.is_dir():
+        return []
+    protected = {
+        safe_component(item, default="")
+        for item in protected_ids
+        if str(item or "").strip()
+    }
+    protected.discard("")
+    try:
+        root_resolved = root_path.resolve()
+    except OSError:
+        return []
+    removed: list[str] = []
+    for path in root_path.rglob("*"):
+        if not path.is_file() or path.is_symlink() or path.name.startswith("."):
+            continue
+        if not is_partial_download(path):
             continue
         try:
-            path.unlink()
-        except OSError:
+            path.resolve().relative_to(root_resolved)
+        except (OSError, ValueError):
             continue
-        removed.append(str(path))
+        vid = partial_video_id(path.name)
+        if vid and safe_component(vid, default="") in protected:
+            continue
+        if vid or _has_finished_sibling(path):
+            if _unlink_file(path):
+                removed.append(str(path))
     return removed
 
 
@@ -418,25 +526,201 @@ def parse_download_marks(text: str) -> tuple[str | None, dict[str, str]]:
     return path, meta
 
 
+def is_bare_id_file(path: Path, video_id: str) -> bool:
+    """True for the in-progress template `[{id}].ext` and nothing else."""
+    vid = safe_component(video_id or "", default="")
+    if not vid:
+        return False
+    return bool(re.fullmatch(rf"\[{re.escape(vid)}\]\.[^.]+", path.name, re.I))
+
+
+def is_saved_media(path: Path) -> bool:
+    """A non-empty finished media file, not a temp, hidden file, or compat sidecar."""
+    if not path.is_file() or path.is_symlink() or path.name.startswith("."):
+        return False
+    if is_partial_download(path) or path.name.lower().endswith(".compat.mp4"):
+        return False
+    if path.suffix.lower() not in _MEDIA_SUFFIXES:
+        return False
+    try:
+        return path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _video_id_token(video_id: str) -> str:
+    vid = safe_component(video_id or "", default="")
+    if not vid:
+        return ""
+    return f"[{vid}]"
+
+
+def find_existing_video_files(root: str, video_id: str) -> tuple[Path | None, Path | None]:
+    """Return (best named file, bare `[{id}].ext` file) for this video id."""
+    token = _video_id_token(video_id)
+    if not token:
+        return None, None
+    try:
+        root_text = os.fspath(root)
+    except TypeError:
+        return None, None
+    if not isinstance(root_text, str) or not root_text:
+        return None, None
+    root_path = Path(root_text)
+    if not root_path.is_dir():
+        return None, None
+    try:
+        root_resolved = root_path.resolve()
+    except OSError:
+        return None, None
+    named: list[Path] = []
+    bare: list[Path] = []
+    for path in root_path.rglob("*"):
+        if not is_saved_media(path) or token not in path.name:
+            continue
+        try:
+            path.resolve().relative_to(root_resolved)
+        except (OSError, ValueError):
+            continue
+        if is_bare_id_file(path, video_id):
+            bare.append(path)
+        else:
+            named.append(path)
+
+    def rank(path: Path) -> tuple[int, int]:
+        dated = 1 if dated_filename(str(path), video_id) else 0
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        return dated, size
+
+    named.sort(key=rank, reverse=True)
+    bare.sort(key=rank, reverse=True)
+    return (named[0] if named else None, bare[0] if bare else None)
+
+
+def _folder_directory(root: str, folder: str) -> Path:
+    dir_name = safe_component(folder, default="_single")
+    if not is_usable_folder(dir_name):
+        dir_name = "_single"
+    return Path(root) / dir_name
+
+
+def adopt_existing_download(
+    root: str,
+    *,
+    video_id: str,
+    title: str,
+    upload_date: str | None = None,
+    folder: str = "",
+) -> str | None:
+    """Use a file already on disk. Rename a bare id file; never overwrite a real one."""
+    named, bare = find_existing_video_files(root, video_id)
+    if named:
+        if (
+            bare
+            and bare.resolve() != named.resolve()
+            and is_bare_id_file(bare, video_id)
+        ):
+            _unlink_file(bare)
+        return str(named)
+    if not bare or not is_bare_id_file(bare, video_id):
+        return None
+    placed = place_downloaded_file(
+        str(bare),
+        title=title,
+        video_id=video_id,
+        upload_date=upload_date,
+        directory=_folder_directory(root, folder),
+    )
+    if placed and Path(placed).is_file() and not is_bare_id_file(Path(placed), video_id):
+        return placed
+    return None
+
+
+def looks_like_already_downloaded(log: str | None) -> bool:
+    text = (log or "").lower()
+    if "already been downloaded" in text or "already downloaded" in text:
+        return True
+    return "file exists" in text and "errno 17" in text
+
+
+def resolve_on_disk_download(output: str, reported: str | None) -> str:
+    """The real media file for this output template, ignoring yt-dlp status lines."""
+    candidate = Path(reported or "")
+    if is_saved_media(candidate):
+        return str(candidate)
+    parent = Path(output).parent
+    prefix = download_output_prefix(output)
+    if not prefix or not parent.is_dir():
+        return ""
+    found: list[Path] = []
+    for path in parent.iterdir():
+        if path.is_file() and path.name.startswith(prefix) and is_saved_media(path):
+            found.append(path)
+    if not found:
+        return ""
+    found.sort(key=lambda path: path.stat().st_size, reverse=True)
+    return str(found[0])
+
+
 def place_downloaded_file(
     src: str,
     *,
     title: str,
     video_id: str,
     upload_date: str | None = None,
+    folder: str | None = None,
+    directory: Path | None = None,
 ) -> str:
-    """Move a finished download to `{title} [{id}]-{YYYY-MM-DD}.ext`."""
+    """Move a finished download to `{title} [{id}]-{YYYY-MM-DD}.ext`.
+
+    A non-empty destination is kept. A 0-byte destination is replaced.
+    Only a bare `[{id}].ext` source is removed when the destination stays.
+    """
     source = Path(src or "")
     if not source.name:
         return src
     suffix = source.suffix or ".mp4"
-    dest = source.with_name(download_stem(title, video_id, upload_date) + suffix)
+    stem = download_stem(title, video_id, upload_date) + suffix
+    if directory is not None:
+        dest = Path(directory) / stem
+    elif folder:
+        dest = _download_dir(folder) / stem
+    else:
+        parent = source.parent if str(source.parent) not in {"", "."} else Path(".")
+        dest = parent / stem
+    if dest.exists() and dest.is_file():
+        try:
+            dest_size = dest.stat().st_size
+        except OSError:
+            dest_size = 1
+        same = False
+        try:
+            same = source.exists() and dest.resolve() == source.resolve()
+        except OSError:
+            same = False
+        if same:
+            return str(source)
+        if dest_size > 0:
+            if source.is_file() and is_bare_id_file(source, video_id):
+                _unlink_file(source)
+            return str(dest)
+        _unlink_file(dest)
     if not source.is_file():
         return str(dest)
-    if dest.resolve() == source.resolve():
-        return str(source)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    source.replace(dest)
+    try:
+        source.replace(dest)
+    except OSError:
+        if dest.is_file():
+            try:
+                if dest.stat().st_size > 0:
+                    return str(dest)
+            except OSError:
+                pass
+        return str(source)
     return str(dest)
 
 
@@ -1377,21 +1661,32 @@ async def download_video(
     last_log = ""
 
     async def _finish(rc, final_path, log):
-        if rc != 0:
+        recoverable = rc == 0 or looks_like_already_downloaded(log)
+        if not recoverable:
             return rc, final_path, log
         printed, meta = parse_download_marks(log)
-        used = printed or final_path or ""
+        reported = printed or final_path or ""
+        used = resolve_on_disk_download(output, reported)
+        if not used:
+            if rc == 0:
+                return 1, None, f"{log}\nDownload finished without a file.".strip()
+            return rc, final_path, log
         named = place_downloaded_file(
             used,
             title=(meta.get("title") or title),
             video_id=(meta.get("id") or video_id),
             upload_date=(meta.get("upload_date") or upload_date),
+            folder=folder_name,
         )
+        if not named or not Path(named).is_file():
+            return 1, None, f"{log}\nDownload finished without a file.".strip()
         try:
-            tv_path = await ensure_tv_compatible(named or "", force_remux=False)
+            tv_path = await ensure_tv_compatible(named, force_remux=False)
         except Exception as exc:
-            return 1, named or final_path, f"{log}\nTV compatible encode failed: {exc}".strip()
-        return rc, tv_path, log
+            return 1, named, f"{log}\nTV compatible encode failed: {exc}".strip()
+        if not tv_path or not Path(tv_path).is_file():
+            return 1, None, f"{log}\nDownload finished without a file.".strip()
+        return 0, tv_path, log
 
     async def _attempt(candidate: str, extra_cookies=None, user_agent=None):
         once_kwargs = {"proxy": proxy} if proxy else {}
@@ -1428,8 +1723,10 @@ async def download_video(
             last_log = f"{candidate}: timed out"
             continue
 
-        if rc == 0:
-            return await _finish(rc, final_path, log)
+        if rc == 0 or looks_like_already_downloaded(log):
+            finished = await _finish(rc, final_path, log)
+            if finished[0] == 0 or rc == 0:
+                return finished
 
         last_rc, last_path, last_log = rc, final_path, log
         if not (flaresolverr_enabled() and looks_like_bot_protection(log)):
@@ -1449,8 +1746,10 @@ async def download_video(
             last_log = f"{last_log}\nFlareSolverr {candidate}: {flare_exc}".strip()
             continue
 
-        if rc == 0:
-            return await _finish(rc, final_path, log)
+        if rc == 0 or looks_like_already_downloaded(log):
+            finished = await _finish(rc, final_path, log)
+            if finished[0] == 0 or rc == 0:
+                return finished
         last_rc, last_path, last_log = rc, final_path, log
 
     return last_rc, last_path, last_log

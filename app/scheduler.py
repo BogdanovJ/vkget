@@ -12,12 +12,13 @@ from .config import settings
 from .db import SessionLocal, reset_pool
 from .filters import rejection_reason
 from .models import AppState, Subscription, Video, format_published
-from .notifier import format_video_notice, notify
+from .notifier import format_video_notice, friendly_failure, notify
 from .queue import RUNNABLE_STATUSES, is_queue_paused, next_queue_rank, queue_order
 from .retention import apply_retention
 from .vpn.runtime import download_with_vpn
 from .ytdlp import (
     PLACEHOLDER_TITLES,
+    adopt_existing_download,
     dated_filename,
     download_folder_name,
     download_video,
@@ -28,6 +29,7 @@ from .ytdlp import (
     label_from_url,
     path_inside_root,
     place_downloaded_file,
+    remove_orphan_partials,
     resolve_video_metadata,
     title_from_entry,
 )
@@ -709,23 +711,69 @@ async def run_one_download() -> bool:
             return False
 
         _apply_resolved_metadata(job, meta, folder_fallback=sub_label)
-        job.status = "DOWNLOADING"
-        job.attempts += 1
-        job.next_attempt_at = None
-
         url = job.webpage_url
         channel = job.channel
         title = job.title
         external_id = job.external_id
         upload_date = job.upload_date
-        attempts = job.attempts
         notice_title = job.display_title()
+        attempts = job.attempts
         db.commit()
 
     folder = download_folder_name(
         subscription_title=sub_label,
         channel=channel,
     )
+    adopted = adopt_existing_download(
+        settings.download_root,
+        video_id=external_id,
+        title=title,
+        upload_date=upload_date,
+        folder=folder,
+    )
+    if adopted:
+        with SessionLocal() as db:
+            job = db.get(Video, video_id)
+            if not job or job.status not in RUNNABLE_STATUSES:
+                return False
+            notice_title = job.display_title()
+            channel = job.channel
+            url = job.webpage_url
+            external_id = job.external_id
+            job.status = "COMPLETED"
+            job.local_path = adopted
+            job.completed_at = now()
+            job.last_error = None
+            set_global_cooldown(
+                db,
+                now() + jitter_minutes(
+                    settings.min_gap_minutes,
+                    settings.max_gap_minutes,
+                ),
+            )
+            db.commit()
+        await notify(
+            format_video_notice(
+                ok=True,
+                title=notice_title,
+                channel=channel,
+                height=settings.max_height,
+                path=adopted,
+                page_url=url,
+                external_id=external_id,
+            )
+        )
+        return True
+
+    with SessionLocal() as db:
+        job = db.get(Video, video_id)
+        if not job or job.status not in RUNNABLE_STATUSES:
+            return False
+        job.status = "DOWNLOADING"
+        job.attempts += 1
+        attempts = job.attempts
+        job.next_attempt_at = None
+        db.commit()
 
     try:
         rc, final_path, log = await download_with_vpn(
@@ -754,7 +802,7 @@ async def run_one_download() -> bool:
                 title=notice_title,
                 channel=channel,
                 page_url=url,
-                detail=f"Download process failed: {type(exc).__name__}",
+                detail=friendly_failure(exc),
                 retry_at=retry_at,
                 external_id=external_id,
             )
@@ -771,7 +819,7 @@ async def run_one_download() -> bool:
         url = job.webpage_url
         external_id = job.external_id
 
-        if rc == 0:
+        if rc == 0 and final_path and os.path.isfile(final_path):
             job.status = "COMPLETED"
             job.local_path = final_path
             job.completed_at = now()
@@ -799,11 +847,14 @@ async def run_one_download() -> bool:
             )
             return True
 
-        kind = classify_error(log)
+        kind = classify_error(log or "")
+        if rc == 0:
+            kind = "TEMPORARY"
+            log = (log or "Download finished without a file.")
         retry_at = retry_time(attempts, kind)
 
         job.status = "FAILED_TEMPORARY"
-        job.last_error = log[-4000:]
+        job.last_error = (log or "")[-4000:]
         job.next_attempt_at = retry_at
 
         if kind in {"RATE_LIMIT", "BLOCK_OR_AUTH", "AUTH"}:
@@ -812,34 +863,57 @@ async def run_one_download() -> bool:
         db.commit()
 
         if kind == "RATE_LIMIT":
-            await notify(
-                format_video_notice(
-                    ok=False,
-                    title=notice_title,
-                    channel=channel,
-                    page_url=url,
-                    detail="VK appears rate-limited.",
-                    retry_at=retry_at,
-                    external_id=external_id,
-                )
-            )
+            detail = "VK appears rate-limited."
         elif kind in {"BLOCK_OR_AUTH", "AUTH"}:
-            await notify(
-                format_video_notice(
-                    ok=False,
-                    title=notice_title,
-                    channel=channel,
-                    page_url=url,
-                    detail="Authentication or access problem.",
-                    retry_at=retry_at,
-                    external_id=external_id,
-                )
+            detail = "Authentication or access problem."
+        else:
+            detail = friendly_failure(log)
+        await notify(
+            format_video_notice(
+                ok=False,
+                title=notice_title,
+                channel=channel,
+                page_url=url,
+                detail=detail,
+                retry_at=retry_at,
+                external_id=external_id,
             )
+        )
     return True
 
 
 
+_KEEP_PARTIAL_STATUSES = ("DOWNLOADING", "QUEUED", "FAILED_TEMPORARY", "PAUSED")
 _rename_settled: set[int] = set()
+
+
+async def sweep_orphan_partials() -> list[str]:
+    """Remove leftover temps while nothing is downloading."""
+    if not storage_ok():
+        return []
+    with SessionLocal() as db:
+        downloading = db.scalar(
+            select(Video.id).where(Video.status == "DOWNLOADING").limit(1)
+        )
+        if downloading:
+            return []
+        protected = {
+            str(item)
+            for item in db.scalars(
+                select(Video.external_id).where(
+                    Video.status.in_(_KEEP_PARTIAL_STATUSES)
+                )
+            ).all()
+            if item
+        }
+    removed = remove_orphan_partials(settings.download_root, protected)
+    if removed:
+        print(
+            "vkget: removed leftover partial downloads: "
+            + ", ".join(os.path.basename(item) for item in removed),
+            flush=True,
+        )
+    return removed
 
 
 async def rename_one_completed_file() -> bool:
@@ -934,6 +1008,7 @@ async def scheduler_loop():
             downloaded = await run_one_download()
             if not downloaded:
                 await rename_one_completed_file()
+            await sweep_orphan_partials()
             with SessionLocal() as db:
                 apply_retention(db)
             delay = SCHEDULER_SLEEP_SECONDS

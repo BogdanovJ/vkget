@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from sqlalchemy import create_engine, select
@@ -11,7 +12,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
 from app.models import Subscription, Video
-from app.notifier import format_video_notice
+from app.notifier import format_video_notice, friendly_failure
 
 
 class FormatVideoNoticeTests(unittest.TestCase):
@@ -81,6 +82,32 @@ class FormatVideoNoticeTests(unittest.TestCase):
         )
 
 
+class FriendlyFailureTests(unittest.TestCase):
+    def test_disk_conflicts_are_sentences(self):
+        exists = friendly_failure(
+            "OSError: [Errno 17] File exists: '/downloads/_single/[-1_2].mp4'"
+        )
+        full = friendly_failure("OSError: [Errno 28] No space left on device")
+        other = friendly_failure("ERROR: unable to download video data: HTTP Error 404")
+        self.assertEqual(exists, "This video is already in the download folder.")
+        self.assertEqual(full, "The download disk is full.")
+        self.assertEqual(other, "unable to download video data: HTTP Error 404.")
+        for text in (exists, full, other):
+            self.assertNotIn("OSError", text)
+            self.assertNotIn("Errno", text)
+            self.assertNotIn("ERROR:", text)
+
+    def test_blank_and_class_name_use_fallback(self):
+        self.assertEqual(
+            friendly_failure("OSError"),
+            "The download failed and will be tried again.",
+        )
+        self.assertEqual(
+            friendly_failure(TimeoutError()),
+            "The download timed out.",
+        )
+
+
 class DownloadNoticeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         fd, self.path = tempfile.mkstemp(suffix=".db")
@@ -88,8 +115,11 @@ class DownloadNoticeTests(unittest.IsolatedAsyncioTestCase):
         self.engine = create_engine(f"sqlite:///{self.path}")
         Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
+        self._vpn_db = patch("app.vpn.settings.SessionLocal", self.Session)
+        self._vpn_db.start()
 
     def tearDown(self):
+        self._vpn_db.stop()
         self.engine.dispose()
         os.unlink(self.path)
 
@@ -119,6 +149,9 @@ class DownloadNoticeTests(unittest.IsolatedAsyncioTestCase):
 
         notices: list[str] = []
         download_kwargs: dict = {}
+        saved = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+        saved.write(b"video")
+        saved.close()
 
         async def fake_meta(url, **kwargs):
             return {
@@ -140,7 +173,7 @@ class DownloadNoticeTests(unittest.IsolatedAsyncioTestCase):
             )
             return (
                 0,
-                "/downloads/Algebra/2024-01-15 - Lecture 4 — Linear maps [-214484275_456239461].mp4",
+                saved.name,
                 "ok",
             )
 
@@ -165,6 +198,7 @@ class DownloadNoticeTests(unittest.IsolatedAsyncioTestCase):
 
             await run_one_download()
 
+        self.addCleanup(lambda: os.path.exists(saved.name) and os.unlink(saved.name))
         self.assertEqual(download_kwargs["title"], "Lecture 4 — Linear maps")
         self.assertEqual(download_kwargs["channel"], "Algebra")
         self.assertEqual(download_kwargs["folder"], "Algebra")
@@ -172,6 +206,7 @@ class DownloadNoticeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(notices), 1)
         self.assertIn("Lecture 4 — Linear maps", notices[0])
         self.assertIn("Algebra · ≤720p", notices[0])
+        self.assertIn(saved.name, notices[0])
         self.assertIn("https://vkvideo.ru/video-214484275_456239461", notices[0])
         self.assertNotIn("Video -214484275_456239461", notices[0])
         self.assertNotIn("/downloads/Subscription/", notices[0])
@@ -337,6 +372,170 @@ class DownloadNoticeTests(unittest.IsolatedAsyncioTestCase):
         with self.Session() as db:
             row = db.get(Video, video_id)
             self.assertEqual(row.local_path, "/downloads/show/talk.mp4")
+
+    async def test_exception_notice_is_a_sentence(self):
+        with self.Session() as db:
+            db.add(
+                Video(
+                    source="vk",
+                    external_id="-1_2",
+                    webpage_url="https://vk.com/video-1_2",
+                    title="Lecture 4",
+                    channel="Algebra",
+                    upload_date="20240115",
+                    status="QUEUED",
+                    next_attempt_at=datetime.now(),
+                )
+            )
+            db.commit()
+
+        notices: list[str] = []
+
+        async def fake_download(*args, **kwargs):
+            raise OSError(17, "File exists")
+
+        async def fake_notify(text):
+            notices.append(text)
+
+        with patch("app.scheduler.SessionLocal", self.Session), patch(
+            "app.scheduler.storage_ok", return_value=True
+        ), patch("app.scheduler.get_global_cooldown", return_value=None), patch(
+            "app.scheduler.download_video", side_effect=fake_download
+        ), patch(
+            "app.scheduler.notify", side_effect=fake_notify
+        ), patch(
+            "app.scheduler.settings"
+        ) as fake_settings, patch(
+            "app.scheduler.adopt_existing_download", return_value=None
+        ):
+            fake_settings.max_height = 720
+            fake_settings.min_gap_minutes = 15
+            fake_settings.max_gap_minutes = 30
+            fake_settings.download_root = "/downloads"
+            from app.scheduler import run_one_download
+
+            await run_one_download()
+
+        self.assertEqual(len(notices), 1)
+        self.assertIn("This video is already in the download folder.", notices[0])
+        self.assertNotIn("OSError", notices[0])
+        with self.Session() as db:
+            job = db.scalar(select(Video))
+            self.assertEqual(job.status, "FAILED_TEMPORARY")
+            self.assertIn("File exists", job.last_error)
+            self.assertNotIn("OSError", notices[0])
+
+    async def test_temporary_failure_is_notified(self):
+        with self.Session() as db:
+            db.add(
+                Video(
+                    source="vk",
+                    external_id="-1_4",
+                    webpage_url="https://vk.com/video-1_4",
+                    title="Lecture 5",
+                    channel="Algebra",
+                    upload_date="20240115",
+                    status="QUEUED",
+                    next_attempt_at=datetime.now(),
+                )
+            )
+            db.commit()
+
+        notices: list[str] = []
+
+        async def fake_download(*args, **kwargs):
+            return 1, None, "ERROR: OSError: [Errno 28] No space left on device"
+
+        async def fake_notify(text):
+            notices.append(text)
+
+        with patch("app.scheduler.SessionLocal", self.Session), patch(
+            "app.scheduler.storage_ok", return_value=True
+        ), patch("app.scheduler.get_global_cooldown", return_value=None), patch(
+            "app.scheduler.download_video", side_effect=fake_download
+        ), patch(
+            "app.scheduler.notify", side_effect=fake_notify
+        ), patch(
+            "app.scheduler.settings"
+        ) as fake_settings, patch(
+            "app.scheduler.adopt_existing_download", return_value=None
+        ):
+            fake_settings.max_height = 720
+            fake_settings.min_gap_minutes = 15
+            fake_settings.max_gap_minutes = 30
+            fake_settings.download_root = "/downloads"
+            from app.scheduler import run_one_download
+
+            await run_one_download()
+
+        self.assertEqual(len(notices), 1)
+        self.assertIn("The download disk is full.", notices[0])
+        self.assertIn("Next attempt:", notices[0])
+        self.assertNotIn("OSError", notices[0])
+
+    async def test_existing_file_completes_without_download(self):
+        root = tempfile.mkdtemp()
+        try:
+            saved = Path(root) / "Manual" / "Lecture [-1_2]-2024-01-15.mp4"
+            saved.parent.mkdir()
+            saved.write_bytes(b"already")
+            with self.Session() as db:
+                db.add(
+                    Video(
+                        source="vk",
+                        external_id="-1_2",
+                        webpage_url="https://vk.com/video-1_2",
+                        title="Lecture",
+                        channel="Algebra",
+                        upload_date="20240115",
+                        status="QUEUED",
+                        attempts=0,
+                        next_attempt_at=datetime.now(),
+                    )
+                )
+                db.commit()
+
+            notices: list[str] = []
+
+            async def fake_download(*args, **kwargs):
+                raise AssertionError("yt-dlp should not run")
+
+            async def fake_notify(text):
+                notices.append(text)
+
+            with patch("app.scheduler.SessionLocal", self.Session), patch(
+                "app.scheduler.storage_ok", return_value=True
+            ), patch("app.scheduler.get_global_cooldown", return_value=None), patch(
+                "app.scheduler.download_video", side_effect=fake_download
+            ), patch(
+                "app.scheduler.notify", side_effect=fake_notify
+            ), patch(
+                "app.scheduler.settings"
+            ) as fake_settings:
+                fake_settings.max_height = 720
+                fake_settings.min_gap_minutes = 15
+                fake_settings.max_gap_minutes = 30
+                fake_settings.download_root = root
+                from app.scheduler import run_one_download
+
+                await run_one_download()
+
+            self.assertEqual(len(notices), 1)
+            self.assertIn(str(saved), notices[0])
+            self.assertTrue(notices[0].startswith("✅ VKGET"))
+            with self.Session() as db:
+                job = db.scalar(select(Video))
+                self.assertEqual(job.status, "COMPLETED")
+                self.assertEqual(job.local_path, str(saved))
+                self.assertEqual(job.attempts, 0)
+            self.assertEqual(saved.read_bytes(), b"already")
+        finally:
+            for path in sorted(Path(root).rglob("*"), reverse=True):
+                if path.is_file():
+                    path.unlink()
+                elif path.is_dir():
+                    path.rmdir()
+            os.rmdir(root)
 
 
 if __name__ == "__main__":
