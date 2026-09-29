@@ -24,7 +24,11 @@ from app.ytdlp import (
     looks_like_no_data_blocks,
     mirror_url,
     normalize_vk_url,
+    adopt_existing_download,
+    is_usable_channel,
     parse_download_marks,
+    place_downloaded_file,
+    remove_orphan_partials,
     remove_stale_download_parts,
     scan_url_candidates,
     to_vk_com,
@@ -361,12 +365,17 @@ class FlareSolverrTests(unittest.IsolatedAsyncioTestCase):
             calls.append(url)
             if "vk.com" in url:
                 return 1, None, "HTTP Error 403: Forbidden"
-            return 0, "/downloads/x.mp4", "ok"
+            final = Path(output.replace("%(ext)s", "mp4"))
+            final.write_bytes(b"video")
+            return 0, str(final), "ok"
 
         with tempfile.TemporaryDirectory() as tmp, patch(
             "app.ytdlp.settings"
         ) as fake_settings, patch(
             "app.ytdlp._download_once", side_effect=fake_once
+        ), patch(
+            "app.ytdlp.ensure_tv_compatible",
+            new=AsyncMock(side_effect=lambda path, force_remux=False: path),
         ):
             fake_settings.flaresolverr_url = ""
             fake_settings.download_root = tmp
@@ -495,12 +504,17 @@ class DownloadOutputWireTests(unittest.IsolatedAsyncioTestCase):
 
         async def fake_once(url, output, fmt, extra_cookies=None, user_agent=None):
             outputs.append(output)
-            return 0, output.replace("%(ext)s", "mp4"), "ok"
+            final = Path(output.replace("%(ext)s", "mp4"))
+            final.write_bytes(b"video")
+            return 0, str(final), "ok"
 
         with tempfile.TemporaryDirectory() as tmp, patch(
             "app.ytdlp.settings"
         ) as fake_settings, patch(
             "app.ytdlp._download_once", side_effect=fake_once
+        ), patch(
+            "app.ytdlp.ensure_tv_compatible",
+            new=AsyncMock(side_effect=lambda path, force_remux=False: path),
         ):
             fake_settings.flaresolverr_url = ""
             fake_settings.download_root = tmp
@@ -525,6 +539,68 @@ class DownloadOutputWireTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Lecture 4", outputs[0])
         self.assertNotIn("/VK Uploader/", outputs[0])
         self.assertTrue(path.endswith("Lecture 4 [-1_2]-2024-01-15.mp4"))
+
+    async def test_already_on_disk_is_renamed_instead_of_failing(self):
+        async def fake_once(url, output, fmt, extra_cookies=None, user_agent=None):
+            final = Path(output.replace("%(ext)s", "mp4"))
+            final.write_bytes(b"video")
+            return 1, None, f"ERROR: [Errno 17] File exists: {final}"
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "app.ytdlp.settings"
+        ) as fake_settings, patch(
+            "app.ytdlp._download_once", side_effect=fake_once
+        ), patch(
+            "app.ytdlp.ensure_tv_compatible",
+            new=AsyncMock(side_effect=lambda path, force_remux=False: path),
+        ):
+            fake_settings.flaresolverr_url = ""
+            fake_settings.download_root = tmp
+            fake_settings.max_height = 720
+            fake_settings.download_rate = "500K"
+            fake_settings.cookie_file = "/missing"
+            from app.ytdlp import download_video
+
+            rc, path, log = await download_video(
+                "https://vk.com/video-1_2",
+                "Algebra",
+                title="Lecture 4",
+                video_id="-1_2",
+                upload_date="20240115",
+                folder="Algebra",
+            )
+            self.assertEqual(rc, 0)
+            self.assertTrue(path.endswith("Lecture 4 [-1_2]-2024-01-15.mp4"))
+            self.assertTrue(os.path.isfile(path))
+            self.assertFalse(path.endswith("[-1_2].mp4"))
+
+    async def test_success_without_a_file_is_not_success(self):
+        async def fake_once(url, output, fmt, extra_cookies=None, user_agent=None):
+            return 0, "not-a-real-file", "ok"
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "app.ytdlp.settings"
+        ) as fake_settings, patch(
+            "app.ytdlp._download_once", side_effect=fake_once
+        ):
+            fake_settings.flaresolverr_url = ""
+            fake_settings.download_root = tmp
+            fake_settings.max_height = 720
+            fake_settings.download_rate = "500K"
+            fake_settings.cookie_file = "/missing"
+            from app.ytdlp import download_video
+
+            rc, path, log = await download_video(
+                "https://vk.com/video-1_2",
+                "Algebra",
+                title="Lecture 4",
+                video_id="-1_2",
+                upload_date="20240115",
+                folder="Algebra",
+            )
+
+        self.assertEqual(rc, 1)
+        self.assertFalse(path and os.path.isfile(path))
 
     async def test_ytdlp_marks_name_the_file_not_the_channel(self):
         async def fake_once(url, output, fmt, extra_cookies=None, user_agent=None, proxy=None):
@@ -569,30 +645,165 @@ class DownloadOutputWireTests(unittest.IsolatedAsyncioTestCase):
 
 
 class StalePartialDownloadTests(unittest.TestCase):
-    def test_removes_tiny_part_but_keeps_large_resume(self):
+    def test_keeps_large_part_and_its_sidecar(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = str(Path(tmp) / "Talk [-1_2].%(ext)s")
             tiny = Path(tmp) / "Talk [-1_2].mp4.part"
+            sidecar = Path(tmp) / "Talk [-1_2].mp4.ytdl"
             large = Path(tmp) / "Talk [-1_2].webm.part"
             empty = Path(tmp) / "Talk [-1_2].mp4"
             keep = Path(tmp) / "Talk [-1_2].mp4.ok"
             tiny.write_bytes(b"x" * 100)
+            sidecar.write_bytes(b"{}")
             large.write_bytes(b"x" * (200 * 1024))
             empty.write_bytes(b"")
             keep.write_bytes(b"done")
 
             removed = remove_stale_download_parts(output)
-            self.assertIn(str(tiny), removed)
             self.assertIn(str(empty), removed)
-            self.assertFalse(tiny.exists())
             self.assertFalse(empty.exists())
+            self.assertTrue(tiny.exists())
+            self.assertTrue(sidecar.exists())
             self.assertTrue(large.exists())
             self.assertTrue(keep.exists())
 
             forced = remove_stale_download_parts(output, force=True)
             self.assertIn(str(large), forced)
+            self.assertIn(str(sidecar), forced)
             self.assertFalse(large.exists())
+            self.assertFalse(sidecar.exists())
+            self.assertFalse(tiny.exists())
             self.assertTrue(keep.exists())
+
+    def test_removes_tiny_partial_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = str(Path(tmp) / "[-1_2].%(ext)s")
+            tiny = Path(tmp) / "[-1_2].mp4.part"
+            sidecar = Path(tmp) / "[-1_2].mp4.ytdl"
+            tiny.write_bytes(b"x" * 100)
+            sidecar.write_bytes(b"{}")
+            removed = remove_stale_download_parts(output)
+            self.assertIn(str(tiny), removed)
+            self.assertIn(str(sidecar), removed)
+            self.assertFalse(tiny.exists())
+            self.assertFalse(sidecar.exists())
+
+    def test_single_is_not_a_channel_or_preferred_folder(self):
+        self.assertFalse(is_usable_channel("_single"))
+        self.assertEqual(download_folder_name(channel="_single"), "_single")
+        self.assertEqual(
+            download_folder_name(subscription_title="Algebra", channel="_single"),
+            "Algebra",
+        )
+
+
+class ExistingFileTests(unittest.TestCase):
+    def test_keeps_proper_file_and_drops_bare_duplicate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proper = root / "Manual" / "Lecture [-220754053_456246764]-2024-01-15.mp4"
+            bare = root / "_single" / "[-220754053_456246764].mp4"
+            proper.parent.mkdir()
+            bare.parent.mkdir()
+            proper.write_bytes(b"kept")
+            bare.write_bytes(b"duplicate")
+
+            adopted = adopt_existing_download(
+                tmp,
+                video_id="-220754053_456246764",
+                title="Lecture",
+                upload_date="20240115",
+                folder="Algebra",
+            )
+
+            self.assertEqual(adopted, str(proper))
+            self.assertEqual(proper.read_bytes(), b"kept")
+            self.assertFalse(bare.exists())
+
+    def test_renames_bare_id_file_without_overwriting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bare = root / "_single" / "[-1_2].mp4"
+            bare.parent.mkdir()
+            bare.write_bytes(b"video")
+            existing = root / "Algebra" / "Lecture [-1_2]-2024-01-15.mp4"
+            existing.parent.mkdir()
+            existing.write_bytes(b"kept")
+
+            placed = place_downloaded_file(
+                str(bare),
+                title="Lecture",
+                video_id="-1_2",
+                upload_date="20240115",
+                directory=existing.parent,
+            )
+
+            self.assertEqual(placed, str(existing))
+            self.assertEqual(existing.read_bytes(), b"kept")
+            self.assertFalse(bare.exists())
+
+    def test_renames_only_bare_copy_into_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bare = root / "_single" / "[-1_2].mp4"
+            bare.parent.mkdir()
+            bare.write_bytes(b"video")
+
+            adopted = adopt_existing_download(
+                tmp,
+                video_id="-1_2",
+                title="Lecture",
+                upload_date="20240115",
+                folder="Algebra",
+            )
+
+            expected = root / "Algebra" / "Lecture [-1_2]-2024-01-15.mp4"
+            self.assertEqual(adopted, str(expected))
+            self.assertTrue(expected.is_file())
+            self.assertEqual(expected.read_bytes(), b"video")
+            self.assertFalse(bare.exists())
+
+
+class OrphanPartialTests(unittest.TestCase):
+    def test_sweep_keeps_active_and_manual_parts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            finished = root / "Show" / "Talk [-9_9]-2024-01-15.mp4"
+            done_part = root / "Show" / "Talk [-9_9]-2024-01-15.mp4.part"
+            queued_part = root / "Show" / "[-1_2].mp4.part"
+            failed_part = root / "Show" / "[-3_4].webm.part"
+            failed_meta = root / "Show" / "[-3_4].webm.ytdl"
+            manual = root / "Elsewhere" / "manual.mp4.part"
+            manual_done = root / "Elsewhere" / "clip.mp4"
+            manual_part = root / "Elsewhere" / "clip.mp4.part"
+            media = root / "Show" / "Keep me.mp4"
+            for path, payload in (
+                (finished, b"show"),
+                (done_part, b"x"),
+                (queued_part, b"x" * 1000),
+                (failed_part, b"x" * (80 * 1024)),
+                (failed_meta, b"{}"),
+                (manual, b"x"),
+                (manual_done, b"clip"),
+                (manual_part, b"x"),
+                (media, b"keep"),
+            ):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(payload)
+
+            removed = remove_orphan_partials(tmp, {"-1_2", "-3_4"})
+
+            self.assertIn(str(done_part), removed)
+            self.assertIn(str(manual_part), removed)
+            self.assertFalse(done_part.exists())
+            self.assertFalse(manual_part.exists())
+            self.assertTrue(queued_part.exists())
+            self.assertTrue(failed_part.exists())
+            self.assertTrue(failed_meta.exists())
+            self.assertTrue(manual.exists())
+            self.assertTrue(finished.exists())
+            self.assertTrue(media.exists())
+            self.assertTrue(manual_done.exists())
 
     def test_detects_data_blocks_error(self):
         self.assertTrue(
@@ -611,7 +822,9 @@ class NoDataBlocksRetryTests(unittest.IsolatedAsyncioTestCase):
             calls.append(url)
             if len(calls) == 1:
                 return 1, None, "ERROR: Did not get any data blocks"
-            return 0, output.replace("%(ext)s", "mp4"), "ok"
+            final = Path(output.replace("%(ext)s", "mp4"))
+            final.write_bytes(b"video")
+            return 0, str(final), "ok"
 
         with tempfile.TemporaryDirectory() as tmp, patch(
             "app.ytdlp.settings"
