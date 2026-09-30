@@ -49,6 +49,8 @@ Playlist and channel **scans** use `vkvideo.ru` (including older rows stored as 
 
 Pasted URLs keep their host when saved. A `vkvideo.ru` subscription stays `vkvideo.ru` in the UI.
 
+A playlist or channel can be subscribed once. `vk.com` and `vkvideo.ru` (including `www`, `m`, and `new`) are the same row, so the status board, scan schedule, and video catalogue are not doubled. A different playlist id is still its own subscription.
+
 ## Bot protection (optional FlareSolverr)
 
 VK/vkvideo sometimes show a JavaScript/cookie challenge similar to Cloudflare. [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) drives a browser, tries to clear that challenge, and returns cookies.

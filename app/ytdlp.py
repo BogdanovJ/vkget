@@ -13,7 +13,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from urllib.parse import unquote, urlparse, urlunparse
+from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlunparse
 
 import httpx
 
@@ -102,6 +102,74 @@ def normalize_vk_url(url: str) -> str:
         path = path.rstrip("/")
 
     return urlunparse((scheme, netloc, path, "", parsed.query, ""))
+
+
+_IDENTITY_QUERY_KEYS = frozenset({"album_id", "section"})
+_AT_PATH_RE = re.compile(r"^/(?:video|videos)/(@[^/]+)$", re.I)
+_PLAYLIST_PATH_RE = re.compile(r"^/(?:video/)?playlist/(-?\d+_\d+)$", re.I)
+
+
+def _vk_identity_host(host: str) -> str | None:
+    """Collapse vk.com / vk.ru / vkvideo.ru, including www, m, and new."""
+    host = (host or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    for prefix in ("m.", "new."):
+        if host.startswith(prefix):
+            rest = host[len(prefix) :]
+            if rest in {"vk.com", "vk.ru", "vkvideo.ru"}:
+                host = rest
+                break
+    if host in {"vk.com", "vk.ru", "vkvideo.ru"}:
+        return "vkvideo.ru"
+    return None
+
+
+def _canonical_vk_subscription_path(path: str) -> str:
+    """One path for the channel page and for a playlist id."""
+    match = _AT_PATH_RE.match(path)
+    if match:
+        return "/" + match.group(1)
+    match = _PLAYLIST_PATH_RE.match(path)
+    if match:
+        return "/playlist/" + match.group(1)
+    return path
+
+
+def _identity_query(query: str) -> str:
+    """Keep album selectors. Drop overlay and tracking parameters."""
+    kept: list[tuple[str, str]] = []
+    for key, value in parse_qsl(query or "", keep_blank_values=False):
+        if key.lower() in _IDENTITY_QUERY_KEYS and value:
+            kept.append((key.lower(), value))
+    kept.sort()
+    return urlencode(kept)
+
+
+def subscription_source_key(url: str) -> str:
+    """Identity of a playlist or channel.
+
+    Host mirrors, tracking queries, and a video opened on top of the channel
+    are the same subscription. A different playlist id is not.
+    """
+    normalized = normalize_vk_url(url)
+    parsed = urlparse(normalized)
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return ""
+    path = unquote(parsed.path or "")
+    if len(path) > 1:
+        path = path.rstrip("/")
+    canonical_host = _vk_identity_host(host)
+    if canonical_host:
+        host = canonical_host
+        path = _canonical_vk_subscription_path(path)
+    path = path.casefold()
+    key = f"{host}{path}"
+    query = _identity_query(parsed.query)
+    if query:
+        key = f"{key}?{query}"
+    return key[:500]
 
 
 def _host(url: str) -> str:
