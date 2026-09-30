@@ -12,6 +12,10 @@
   </form>
 </section>
 
+{% if already %}
+<div class="notice">ALREADY SUBSCRIBED. THIS CHANNEL STAYS ONE ROW ON THE BOARD.</div>
+{% endif %}
+
 {% if sub.last_scan_result %}
 <div class="notice{% if sub.last_scan_result.startswith('FAILED') %} bad{% endif %}">
   LAST SCAN{% if sub.last_scan_at %}: {{ sub.last_scan_at|stamp }}{% endif %}

@@ -180,6 +180,49 @@ class UrlConversionTests(unittest.TestCase):
             "-123_456",
         )
 
+    def test_subscription_key_collapses_host_and_channel_aliases(self):
+        from app.ytdlp import subscription_source_key
+
+        channel = "vkvideo.ru/@shows"
+        self.assertEqual(
+            subscription_source_key("https://vk.com/@Shows/"),
+            channel,
+        )
+        self.assertEqual(
+            subscription_source_key("https://vkvideo.ru/video/@shows?z=video-1_2"),
+            channel,
+        )
+        self.assertEqual(
+            subscription_source_key("http://m.vk.com/video/@shows?ref=feed"),
+            channel,
+        )
+        self.assertEqual(
+            subscription_source_key("https://new.vk.com/@shows"),
+            channel,
+        )
+        self.assertEqual(
+            subscription_source_key("https://www.vk.ru/videos/@shows/"),
+            channel,
+        )
+
+    def test_subscription_key_keeps_distinct_playlists(self):
+        from app.ytdlp import subscription_source_key
+
+        one = subscription_source_key("https://vk.com/playlist/-1_2")
+        two = subscription_source_key("https://vkvideo.ru/video/playlist/-1_2?ref=1")
+        other = subscription_source_key("https://vk.com/playlist/-1_3")
+        album = subscription_source_key(
+            "https://vk.com/videos-1?section=album_7&ref=feed"
+        )
+        videos = subscription_source_key("https://vkvideo.ru/videos-1")
+        self.assertEqual(one, "vkvideo.ru/playlist/-1_2")
+        self.assertEqual(two, one)
+        self.assertNotEqual(other, one)
+        self.assertEqual(videos, "vkvideo.ru/videos-1")
+        self.assertEqual(album, "vkvideo.ru/videos-1?section=album_7")
+        self.assertEqual(subscription_source_key("   "), "")
+        self.assertEqual(subscription_source_key("https://example.com/A/B/"), "example.com/a/b")
+
     def test_non_vk_urls_are_left_alone(self):
         url = "https://example.com/watch?v=1"
         self.assertEqual(to_vk_com(url), url)

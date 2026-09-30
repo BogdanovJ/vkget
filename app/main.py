@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .config import settings
@@ -75,6 +76,7 @@ from .ytdlp import (
     label_from_url,
     normalize_vk_url,
     resolve_video_metadata,
+    subscription_source_key,
     title_from_entry,
     to_vkvideo,
 )
@@ -242,6 +244,27 @@ def add_page(request: Request):
         context={},
     )
 
+def find_subscription_for_url(db: Session, url: str) -> Subscription | None:
+    """The subscription already tracking this playlist or channel."""
+    key = subscription_source_key(url)
+    if not key:
+        return None
+    exact = db.scalar(select(Subscription).where(Subscription.source_key == key))
+    if exact:
+        return exact
+    for sub in db.scalars(select(Subscription).order_by(Subscription.id.asc())).all():
+        if subscription_source_key(sub.source_url or "") == key:
+            return sub
+    return None
+
+
+def _already_subscribed(sub: Subscription) -> RedirectResponse:
+    return RedirectResponse(
+        f"/subscriptions/{sub.id}?already=1",
+        status_code=303,
+    )
+
+
 @app.post("/subscriptions")
 async def add_subscription(
     url: str = Form(...),
@@ -253,6 +276,13 @@ async def add_subscription(
     db: Session = Depends(get_db),
 ):
     source_url = normalize_vk_url(url)
+    if not subscription_source_key(source_url):
+        raise HTTPException(400, "Enter a playlist or channel URL")
+
+    existing = find_subscription_for_url(db, source_url)
+    if existing:
+        return _already_subscribed(existing)
+
     custom_name = (name or "").strip()
     sub = Subscription(
         source_url=source_url,
@@ -266,7 +296,15 @@ async def add_subscription(
     )
 
     db.add(sub)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        with db.no_autoflush:
+            existing = find_subscription_for_url(db, source_url)
+        if existing:
+            return _already_subscribed(existing)
+        raise
     db.refresh(sub)
 
     await scan_subscription(sub.id, initial=True)
@@ -340,6 +378,7 @@ async def add_one_off(
 def subscription_detail(
     sub_id: int,
     request: Request,
+    already: str | None = None,
     db: Session = Depends(get_db),
 ):
     sub = db.get(Subscription, sub_id)
@@ -360,6 +399,7 @@ def subscription_detail(
         context={
             "sub": sub,
             "videos": videos,
+            "already": already == "1",
             "retention_label": describe_retention(
                 sub.retention_days,
                 get_common_retention_days(db),

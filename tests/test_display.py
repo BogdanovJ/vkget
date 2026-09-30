@@ -83,6 +83,16 @@ class VkvideoFilterTests(unittest.TestCase):
         self.assertIn('action="/subscriptions/1/delete"', html)
         self.assertIn("DELETE SUBSCRIPTION", html)
         self.assertIn("NEWEST: UNKNOWN", html)
+        self.assertNotIn("ALREADY SUBSCRIBED", html)
+
+    def test_subscription_detail_explains_duplicate_channel(self):
+        html = templates.env.get_template("subscription.html").render(
+            sub=FakeSub(),
+            videos=[],
+            already=True,
+        )
+        self.assertIn("ALREADY SUBSCRIBED", html)
+        self.assertIn("ONE ROW ON THE BOARD", html)
 
     def test_catalogue_shows_upload_date(self):
         video = Video(

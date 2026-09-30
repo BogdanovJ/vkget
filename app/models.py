@@ -8,6 +8,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .db import Base
@@ -63,6 +64,7 @@ class Subscription(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     source_url: Mapped[str] = mapped_column(Text)
+    source_key: Mapped[str | None] = mapped_column(String(500), nullable=True, unique=True)
     title: Mapped[str] = mapped_column(String(500), default="Subscription")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     initial_last_n: Mapped[int] = mapped_column(Integer, default=3)
@@ -111,6 +113,16 @@ class Subscription(Base):
         if title in PLACEHOLDER_TITLES:
             return False
         return title != label_from_url(self.source_url)
+
+
+@event.listens_for(Subscription, "before_insert")
+def assign_subscription_source_key(mapper, connection, target) -> None:
+    if (target.source_key or "").strip():
+        return
+    from .ytdlp import subscription_source_key
+
+    target.source_key = subscription_source_key(target.source_url or "") or None
+
 
 class Video(Base):
     __tablename__ = "videos"
