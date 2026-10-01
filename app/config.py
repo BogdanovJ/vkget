@@ -10,11 +10,32 @@ def env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def env_int(name: str, default: int) -> int:
+def env_int(
+    name: str,
+    default: int,
+    *,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
     raw = os.getenv(name)
     if raw is None or not raw.strip():
-        return default
-    return int(raw)
+        value = default
+    else:
+        try:
+            value = int(raw.strip())
+        except ValueError:
+            raise SystemExit(f"{name} must be an integer, got {raw!r}") from None
+    if minimum is not None and value < minimum:
+        value = minimum
+    if maximum is not None and value > maximum:
+        value = maximum
+    return value
+
+
+def ordered_pair(low: int, high: int) -> tuple[int, int]:
+    if low > high:
+        return high, low
+    return low, high
 
 
 def build_database_url() -> str:
@@ -36,12 +57,24 @@ class Settings:
     database_url: str = build_database_url()
     download_root: str = os.getenv("DOWNLOAD_ROOT", "/downloads")
     cookie_file: str = os.getenv("COOKIE_FILE", "/config/cookies.txt")
-    max_height: int = min(int(os.getenv("MAX_HEIGHT", "720")), 720)
+    max_height: int = env_int("MAX_HEIGHT", 720, minimum=144, maximum=720)
     download_rate: str = os.getenv("DOWNLOAD_RATE", "500K")
-    min_gap_minutes: int = int(os.getenv("MIN_GAP_MINUTES", "15"))
-    max_gap_minutes: int = int(os.getenv("MIN_GAP_MAX_MINUTES", "30"))
-    discovery_min_hours: int = int(os.getenv("DISCOVERY_INTERVAL_MIN_HOURS", "3"))
-    discovery_max_hours: int = int(os.getenv("DISCOVERY_INTERVAL_MAX_HOURS", "6"))
+    min_gap_minutes: int = ordered_pair(
+        env_int("MIN_GAP_MINUTES", 15, minimum=0),
+        env_int("MIN_GAP_MAX_MINUTES", 30, minimum=0),
+    )[0]
+    max_gap_minutes: int = ordered_pair(
+        env_int("MIN_GAP_MINUTES", 15, minimum=0),
+        env_int("MIN_GAP_MAX_MINUTES", 30, minimum=0),
+    )[1]
+    discovery_min_hours: int = ordered_pair(
+        env_int("DISCOVERY_INTERVAL_MIN_HOURS", 3, minimum=0),
+        env_int("DISCOVERY_INTERVAL_MAX_HOURS", 6, minimum=0),
+    )[0]
+    discovery_max_hours: int = ordered_pair(
+        env_int("DISCOVERY_INTERVAL_MIN_HOURS", 3, minimum=0),
+        env_int("DISCOVERY_INTERVAL_MAX_HOURS", 6, minimum=0),
+    )[1]
     telegram_bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     telegram_chat_id: str = os.getenv("TELEGRAM_CHAT_ID", "")
     flaresolverr_url: str = os.getenv(

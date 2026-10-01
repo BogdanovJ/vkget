@@ -66,6 +66,16 @@ def next_queue_rank(db) -> int:
     return int(current or 0) + 1
 
 
+def _active_queue(db) -> list[Video]:
+    return list(
+        db.scalars(
+            select(Video)
+            .where(Video.status.in_(ACTIVE_STATUSES))
+            .order_by(*queue_order())
+        ).all()
+    )
+
+
 def list_queue(db, limit: int = 200) -> list[Video]:
     return list(
         db.scalars(
@@ -77,13 +87,18 @@ def list_queue(db, limit: int = 200) -> list[Video]:
     )
 
 
+def download_in_progress(db) -> bool:
+    row = db.scalar(select(Video.id).where(Video.status == "DOWNLOADING").limit(1))
+    return row is not None
+
+
 def _renumber(items: list[Video]) -> None:
     for rank, item in enumerate(items, start=1):
         item.queue_rank = rank
 
 
 def move_queue_item(db, video_id: int, delta: int) -> bool:
-    items = list_queue(db)
+    items = _active_queue(db)
     index = next((i for i, item in enumerate(items) if item.id == video_id), None)
     if index is None:
         return False
@@ -102,7 +117,7 @@ def retry_now(db, video: Video) -> bool:
     video.status = "QUEUED"
     video.next_attempt_at = now()
     video.ignore_reason = None
-    items = list_queue(db)
+    items = _active_queue(db)
     rest = [item for item in items if item.id != video.id]
     downloading = [item for item in rest if item.status == "DOWNLOADING"]
     waiting = [item for item in rest if item.status != "DOWNLOADING"]

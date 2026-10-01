@@ -12,7 +12,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
 from app.models import Subscription, Video
-from app.notifier import format_video_notice, friendly_failure
+from app.notifier import escape_markdown, format_video_notice, friendly_failure
 
 
 class FormatVideoNoticeTests(unittest.TestCase):
@@ -30,11 +30,12 @@ class FormatVideoNoticeTests(unittest.TestCase):
             text,
             "\n".join(
                 [
-                    "✅ VKGET",
-                    "Lecture 4 — Linear maps",
+                    "*Downloaded*",
+                    "",
+                    "*Lecture 4 — Linear maps*",
                     "Algebra · ≤720p",
-                    "https://vkvideo.ru/video-1_2",
-                    "/downloads/Algebra/2024-01-15 - Lecture 4 — Linear maps [-1_2].mp4",
+                    "[Open](https://vkvideo.ru/video-1_2)",
+                    "`/downloads/Algebra/2024-01-15 - Lecture 4 — Linear maps \\[-1\\_2].mp4`",
                 ]
             ),
         )
@@ -50,10 +51,10 @@ class FormatVideoNoticeTests(unittest.TestCase):
             external_id="-214484275_456239461",
         )
         lines = text.splitlines()
-        self.assertEqual(lines[0], "✅ VKGET")
-        self.assertEqual(lines[1], "Video -214484275_456239461")
-        self.assertEqual(lines[2], "Downloaded ≤720p")
-        self.assertIn("https://vkvideo.ru/video-214484275_456239461", text)
+        self.assertEqual(lines[0], "*Downloaded*")
+        self.assertEqual(lines[2], r"*Video -214484275\_456239461*")
+        self.assertEqual(lines[3], "Downloaded ≤720p")
+        self.assertIn("[Open](https://vkvideo.ru/video-214484275_456239461)", text)
         self.assertNotIn("Subscription ·", text)
 
     def test_failure_includes_name_url_and_retry(self):
@@ -71,15 +72,34 @@ class FormatVideoNoticeTests(unittest.TestCase):
             text,
             "\n".join(
                 [
-                    "⚠ VKGET",
-                    "Lecture 4 — Linear maps",
+                    "*Failed*",
+                    "",
+                    "*Lecture 4 — Linear maps*",
                     "Algebra",
                     "VK appears rate-limited.",
-                    "https://vkvideo.ru/video-1_2",
+                    "[Open](https://vkvideo.ru/video-1_2)",
                     "Next attempt: 2026-09-08 21:00",
                 ]
             ),
         )
+
+
+    def test_markdown_escapes_title_but_not_the_link_target(self):
+        text = format_video_notice(
+            ok=True,
+            title="Talk *a_b` [c]",
+            channel="Algebra",
+            height=720,
+            path="/downloads/a_b/file.mp4",
+            page_url="https://vk.com/video-1_2",
+            external_id="-1_2",
+        )
+        self.assertIn(r"*Talk \*a\_b\` \[c]*", text)
+        self.assertIn("[Open](https://vkvideo.ru/video-1_2)", text)
+        self.assertNotIn(r"\[Open]", text)
+        self.assertIn(r"`/downloads/a\_b/file.mp4`", text)
+        self.assertNotIn("✅", text)
+        self.assertNotIn("⚠", text)
 
 
 class FriendlyFailureTests(unittest.TestCase):
@@ -206,7 +226,7 @@ class DownloadNoticeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(notices), 1)
         self.assertIn("Lecture 4 — Linear maps", notices[0])
         self.assertIn("Algebra · ≤720p", notices[0])
-        self.assertIn(saved.name, notices[0])
+        self.assertIn(escape_markdown(saved.name), notices[0])
         self.assertIn("https://vkvideo.ru/video-214484275_456239461", notices[0])
         self.assertNotIn("Video -214484275_456239461", notices[0])
         self.assertNotIn("/downloads/Subscription/", notices[0])
@@ -217,6 +237,47 @@ class DownloadNoticeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(job.title, "Lecture 4 — Linear maps")
             self.assertEqual(job.channel, "Algebra")
             self.assertEqual(job.upload_date, "20240115")
+
+    async def test_success_without_a_file_is_not_completed(self):
+        with self.Session() as db:
+            video = Video(
+                source="vk",
+                external_id="-1_2",
+                webpage_url="https://vk.com/video-1_2",
+                title="Talk",
+                channel="Channel",
+                upload_date="20240115",
+                status="QUEUED",
+                next_attempt_at=datetime.now(),
+            )
+            db.add(video)
+            db.commit()
+            video_id = video.id
+
+        async def fake_download(*args, **kwargs):
+            return 0, None, "ok"
+
+        with patch("app.scheduler.SessionLocal", self.Session), patch(
+            "app.scheduler.storage_ok", return_value=True
+        ), patch("app.scheduler.get_global_cooldown", return_value=None), patch(
+            "app.scheduler.resolve_video_metadata",
+            new=AsyncMock(return_value={"title": "Talk", "channel": "Channel", "upload_date": "20240115"}),
+        ), patch(
+            "app.scheduler.download_video", side_effect=fake_download
+        ), patch("app.scheduler.notify", new=AsyncMock()), patch(
+            "app.scheduler.settings"
+        ) as fake_settings:
+            fake_settings.max_height = 720
+            fake_settings.min_gap_minutes = 15
+            fake_settings.max_gap_minutes = 30
+            from app.scheduler import run_one_download
+
+            await run_one_download()
+
+        with self.Session() as db:
+            job = db.get(Video, video_id)
+            self.assertEqual(job.status, "FAILED_TEMPORARY")
+            self.assertFalse(job.local_path)
 
     async def test_download_uses_subscription_name_when_channel_missing(self):
         with self.Session() as db:
@@ -334,44 +395,6 @@ class DownloadNoticeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(download_kwargs["folder"], "Algebra course")
         self.assertEqual(download_kwargs["channel"], "VK Uploader")
         self.assertEqual(download_kwargs["title"], "Lecture 4")
-
-    async def test_idle_reencode_updates_local_path(self):
-        with self.Session() as db:
-            video = Video(
-                source="vk",
-                external_id="-1_2",
-                webpage_url="https://vk.com/video-1_2",
-                title="Talk",
-                channel="Channel",
-                status="COMPLETED",
-                local_path="/downloads/show/talk.webm",
-            )
-            db.add(video)
-            db.commit()
-            video_id = video.id
-
-        async def fake_next(root=None):
-            return "/downloads/show/talk.webm"
-
-        async def fake_ensure(path, *, force_remux=True):
-            self.assertEqual(path, "/downloads/show/talk.webm")
-            self.assertFalse(force_remux)
-            return "/downloads/show/talk.mp4"
-
-        with patch("app.scheduler.SessionLocal", self.Session), patch(
-            "app.scheduler.storage_ok", return_value=True
-        ), patch(
-            "app.scheduler.next_library_tv_rewrite", side_effect=fake_next
-        ), patch(
-            "app.scheduler.ensure_tv_compatible", side_effect=fake_ensure
-        ):
-            from app.scheduler import run_one_tv_reencode
-
-            self.assertTrue(await run_one_tv_reencode())
-
-        with self.Session() as db:
-            row = db.get(Video, video_id)
-            self.assertEqual(row.local_path, "/downloads/show/talk.mp4")
 
     async def test_exception_notice_is_a_sentence(self):
         with self.Session() as db:
@@ -521,8 +544,8 @@ class DownloadNoticeTests(unittest.IsolatedAsyncioTestCase):
                 await run_one_download()
 
             self.assertEqual(len(notices), 1)
-            self.assertIn(str(saved), notices[0])
-            self.assertTrue(notices[0].startswith("✅ VKGET"))
+            self.assertIn(escape_markdown(str(saved)), notices[0])
+            self.assertTrue(notices[0].startswith("*Downloaded*"))
             with self.Session() as db:
                 job = db.scalar(select(Video))
                 self.assertEqual(job.status, "COMPLETED")

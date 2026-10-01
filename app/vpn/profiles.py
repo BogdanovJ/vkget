@@ -85,10 +85,15 @@ def update_profile(
         if not title:
             raise ProfileError("Profile name is required")
         profile.name = title[:200]
+    was_selected = bool(profile.is_default)
+    new_type = profile.vpn_type
     if vpn_type is not None:
-        profile.vpn_type = normalize_vpn_type(vpn_type)
-    if config_text is not None:
-        profile.config_text = validate_config(profile.vpn_type, config_text)
+        new_type = normalize_vpn_type(vpn_type)
+    new_config = profile.config_text if config_text is None else config_text
+    if vpn_type is not None or config_text is not None:
+        new_config = validate_config(new_type, new_config)
+        profile.vpn_type = new_type
+        profile.config_text = new_config
     if enabled is not None:
         profile.enabled = enabled
         if not enabled and profile.is_default:
@@ -99,7 +104,7 @@ def update_profile(
     db.commit()
     if is_default:
         set_selected_profile(db, profile.id)
-    elif enabled is False:
+    elif enabled is False and was_selected:
         other = db.scalar(
             select(VpnProfile).where(
                 VpnProfile.enabled.is_(True),

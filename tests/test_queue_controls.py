@@ -65,6 +65,16 @@ class QueueControlTests(unittest.TestCase):
             self.assertEqual(titles, ["Second", "First", "Third"])
             self.assertEqual([item.queue_rank for item in list_queue(db)], [1, 2, 3])
 
+    def test_renumber_includes_rows_past_the_page(self):
+        with self.Session() as db:
+            db.add_all(_video(f"-1_{index}", rank=500 - index) for index in range(201))
+            db.commit()
+            movable = db.query(Video).filter_by(external_id="-1_1").one()
+            self.assertTrue(move_queue_item(db, movable.id, -1))
+            ranks = [row.queue_rank for row in db.query(Video).all()]
+            self.assertEqual(sorted(ranks), list(range(1, 202)))
+            self.assertEqual(len(set(ranks)), 201)
+
     def test_retry_now_moves_to_front(self):
         with self.Session() as db:
             later = _video("-1_9", rank=2, minutes=60, status="FAILED_TEMPORARY")

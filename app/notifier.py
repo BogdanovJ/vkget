@@ -99,6 +99,14 @@ def friendly_failure(text: BaseException | str | None) -> str:
     return line
 
 
+_MARKDOWN_SPECIAL = re.compile(r"([*_`\[])")
+
+
+def escape_markdown(text: str) -> str:
+    """Escape Telegram legacy Markdown. Do not use this on a link target."""
+    return _MARKDOWN_SPECIAL.sub(r"\\\1", text or "")
+
+
 def _technical_failure_line(line: str) -> bool:
     lowered = line.casefold()
     if "oserror" in lowered or "errno" in lowered or "traceback" in lowered:
@@ -118,10 +126,12 @@ def format_video_notice(
     retry_at=None,
     external_id: str = "",
 ) -> str:
-    shown_title = composed_title(title, channel=channel, external_id=external_id)
-    shown_channel = channel if is_usable_channel(channel) else ""
+    shown_title = escape_markdown(
+        composed_title(title, channel=channel, external_id=external_id)
+    )
+    shown_channel = escape_markdown(channel) if is_usable_channel(channel) else ""
     page = to_vkvideo(page_url) if page_url else ""
-    lines = ["✅ VKGET" if ok else "⚠ VKGET", shown_title]
+    lines = ["*Downloaded*" if ok else "*Failed*", "", f"*{shown_title}*"]
     if ok:
         if shown_channel and height is not None:
             lines.append(f"{shown_channel} · ≤{height}p")
@@ -130,19 +140,19 @@ def format_video_notice(
         elif shown_channel:
             lines.append(shown_channel)
         if page:
-            lines.append(page)
+            lines.append(f"[Open]({page})")
         if path:
-            lines.append(path)
+            lines.append(f"`{escape_markdown(path)}`")
     else:
         if shown_channel:
             lines.append(shown_channel)
         if detail:
-            lines.append(detail)
+            lines.append(escape_markdown(detail))
         if page:
-            lines.append(page)
+            lines.append(f"[Open]({page})")
         if retry_at is not None:
             lines.append(f"Next attempt: {retry_at:%Y-%m-%d %H:%M}")
-    return "\n".join(line for line in lines if line)
+    return "\n".join(lines)
 
 
 async def notify(text: str):
@@ -158,8 +168,12 @@ async def notify(text: str):
                 json={
                     "chat_id": settings.telegram_chat_id,
                     "text": text,
+                    "parse_mode": "Markdown",
+                    "link_preview_options": {"is_disabled": True},
                 },
             )
-    except Exception:
-        # Notifications must never break the scheduler.
-        pass
+    except Exception as exc:
+        print(
+            f"vkget: telegram notify failed: {type(exc).__name__}: {exc}",
+            flush=True,
+        )

@@ -28,7 +28,7 @@ Subscription downloads go in one folder named after the subscription:
 
 `/downloads/{subscription}/{title} [{id}]-{YYYY-MM-DD}.mp4`
 
-Files are remuxed or transcoded to a Samsung-safe MP4: H.264 High@L4.0, 8-bit 4:2:0, even dimensions up to 1280×720, AAC-LC stereo (48 kHz), `avc1` + faststart. HE-AAC, surround, `avc3`, high level, odd sizes, and VP9/AV1/Opus sources are converted. Existing library files that fail those checks are re-encoded when the downloader is idle.
+Files are remuxed or transcoded to a Samsung-safe MP4: H.264 High@L4.0, 8-bit 4:2:0, even dimensions up to 1280×720, AAC-LC stereo (48 kHz), `avc1` + faststart. HE-AAC, surround, `avc3`, high level, odd sizes, and VP9/AV1/Opus sources are converted.
 
 One-off downloads use the uploader name, or `_single`. Placeholder leftovers (`Subscription`, `Unknown`, `NA`) are never used as folder names. The file title comes from yt-dlp, not the channel name. If the upload date is unknown, the `-{YYYY-MM-DD}` suffix is omitted instead of writing `NA`. When the downloader is idle, a completed file whose name is not yet in that shape is renamed, one file at a time, and its catalogue path is updated.
 

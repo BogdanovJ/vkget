@@ -12,17 +12,7 @@ from .geo import GeoResult, lookup_egress
 from .ovpn import OvpnError, sanitize_ovpn
 from .profiles import mark_profile_failure, mark_profile_success
 from .settings import gateway_base_url, proxy_url
-from .status import explain_gateway_failure
 from .wireguard import WireGuardError, sanitize_wireguard
-
-
-@dataclass
-class GatewayStatus:
-    connected: bool = False
-    available: bool = False
-    vpn_type: str | None = None
-    endpoint_ip: str | None = None
-    detail: str = ""
 
 
 @dataclass
@@ -48,28 +38,6 @@ def _sanitize_profile(profile: VpnProfile) -> str:
 
 
 class VPNManager:
-    async def check_connection(self) -> GatewayStatus:
-        base = gateway_base_url()
-        if not base:
-            _label, detail = explain_gateway_failure("unconfigured")
-            return GatewayStatus(detail=detail)
-        try:
-            timeout = httpx.Timeout(2.0, connect=1.0)
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.get(f"{base}/status")
-                response.raise_for_status()
-                data = response.json()
-        except Exception as exc:
-            _label, detail = explain_gateway_failure(exc)
-            return GatewayStatus(detail=detail)
-        return GatewayStatus(
-            connected=bool(data.get("connected")),
-            available=True,
-            vpn_type=data.get("type") or data.get("protocol"),
-            endpoint_ip=data.get("endpoint_ip"),
-            detail=str(data.get("detail") or ""),
-        )
-
     async def disconnect(self) -> None:
         base = gateway_base_url()
         if not base:
@@ -118,20 +86,27 @@ class VPNManager:
         print("vkget: VPN connected", flush=True)
         return ConnectResult(True, "connected")
 
-    async def connect_and_probe(self, profile: VpnProfile) -> ConnectResult:
+    async def connect_and_probe(
+        self,
+        profile: VpnProfile,
+        *,
+        count_failure: bool = True,
+    ) -> ConnectResult:
         started = time.monotonic()
         result = await self.connect(profile)
         if not result.ok:
-            with SessionLocal() as db:
-                mark_profile_failure(db, profile.id, result.detail)
+            if count_failure:
+                with SessionLocal() as db:
+                    mark_profile_failure(db, profile.id, result.detail)
             return result
         try:
             geo = await lookup_egress(proxy_url())
         except Exception as exc:
             await self.disconnect()
             detail = f"exit check failed: {exc}"
-            with SessionLocal() as db:
-                mark_profile_failure(db, profile.id, detail)
+            if count_failure:
+                with SessionLocal() as db:
+                    mark_profile_failure(db, profile.id, detail)
             return ConnectResult(False, detail)
         latency_ms = int((time.monotonic() - started) * 1000)
         with SessionLocal() as db:
