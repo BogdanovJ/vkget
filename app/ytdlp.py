@@ -428,17 +428,33 @@ def iter_download_artifacts(output: str):
             yield path
 
 
-_FRAGMENT_RE = re.compile(r"\.f\d+\.", re.I)
+# yt-dlp names an unmerged stream "{stem}.f{format_id}.{ext}".
+# VK format ids are not only digits: dash_sep-11, url720, hls-0.
+_FRAGMENT_RE = re.compile(
+    r"\.f(?:\d+|dash[_-][^./]+|url\d+|hls[_-][^./]+)\.",
+    re.I,
+)
 _ID_IN_BRACKETS_RE = re.compile(r"\[(-?\d+_\d+)\]")
 _MEDIA_SUFFIXES = _EMPTY_MEDIA_SUFFIXES | {".mov", ".m4v"}
+_AUDIO_ONLY_SUFFIXES = {".m4a", ".mp3"}
 
 
 def is_partial_download(path: Path) -> bool:
-    """yt-dlp temps: .part, .ytdl, fragment files, and .part-Frag pieces."""
-    name = path.name.lower()
-    if name.endswith(".part") or name.endswith(".ytdl") or ".part" in name:
+    """yt-dlp temps: .part, .ytdl, unmerged DASH/HLS streams, and .part-Frag pieces.
+
+    A finished audio stream such as [{id}].fdash_sep-11.m4a is only one half of
+    the video. It stays on disk so the next attempt can continue, and it is not
+    a completed download.
+    """
+    name = path.name
+    lowered = name.lower()
+    if lowered.endswith(".part") or lowered.endswith(".ytdl") or ".part" in lowered:
         return True
-    return bool(_FRAGMENT_RE.search(name))
+    if _FRAGMENT_RE.search(lowered):
+        return True
+    if Path(lowered).suffix in _AUDIO_ONLY_SUFFIXES and _ID_IN_BRACKETS_RE.search(name):
+        return True
+    return False
 
 
 def _unlink_file(path: Path) -> bool:
@@ -749,6 +765,8 @@ def place_downloaded_file(
     """
     source = Path(src or "")
     if not source.name:
+        return src
+    if is_partial_download(source):
         return src
     suffix = source.suffix or ".mp4"
     stem = download_stem(title, video_id, upload_date) + suffix
