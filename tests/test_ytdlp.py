@@ -25,9 +25,11 @@ from app.ytdlp import (
     mirror_url,
     normalize_vk_url,
     adopt_existing_download,
+    is_partial_download,
     is_usable_channel,
     parse_download_marks,
     place_downloaded_file,
+    resolve_on_disk_download,
     remove_orphan_partials,
     remove_stale_download_parts,
     scan_url_candidates,
@@ -731,6 +733,32 @@ class StalePartialDownloadTests(unittest.TestCase):
             self.assertFalse(tiny.exists())
             self.assertFalse(sidecar.exists())
 
+    def test_dash_audio_stream_is_a_partial_kept_for_resume(self):
+        audio = Path("[-211437014_456248648].fdash_sep-11.m4a")
+        video = Path("[-211437014_456248648].fdash_sep-4.mp4")
+        numeric = Path("[-1_2].f137.mp4")
+        finished = Path("Talk [-211437014_456248648]-2026-09-11.mp4")
+        bare = Path("[-211437014_456248648].mp4")
+        self.assertTrue(is_partial_download(audio))
+        self.assertTrue(is_partial_download(video))
+        self.assertTrue(is_partial_download(numeric))
+        self.assertTrue(is_partial_download(Path("[-1_2].m4a")))
+        self.assertFalse(is_partial_download(finished))
+        self.assertFalse(is_partial_download(bare))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = str(Path(tmp) / "[-211437014_456248648].%(ext)s")
+            audio_file = Path(tmp) / audio.name
+            video_part = Path(tmp) / "[-211437014_456248648].fdash_sep-4.mp4.part"
+            audio_file.write_bytes(b"a" * (400 * 1024))
+            video_part.write_bytes(b"v" * (900 * 1024))
+
+            removed = remove_stale_download_parts(output)
+            self.assertEqual(removed, [])
+            self.assertTrue(audio_file.exists())
+            self.assertTrue(video_part.exists())
+            self.assertEqual(resolve_on_disk_download(output, str(audio_file)), "")
+
     def test_single_is_not_a_channel_or_preferred_folder(self):
         self.assertFalse(is_usable_channel("_single"))
         self.assertEqual(download_folder_name(channel="_single"), "_single")
@@ -806,6 +834,38 @@ class ExistingFileTests(unittest.TestCase):
             self.assertEqual(expected.read_bytes(), b"video")
             self.assertFalse(bare.exists())
 
+    def test_unmerged_dash_audio_is_not_a_finished_download(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audio = root / "Shows" / "[-211437014_456248648].fdash_sep-11.m4a"
+            audio.parent.mkdir()
+            audio.write_bytes(b"a" * (500 * 1024))
+
+            adopted = adopt_existing_download(
+                tmp,
+                video_id="-211437014_456248648",
+                title="№ 761",
+                upload_date="20260911",
+                folder="Shows",
+            )
+
+            self.assertIsNone(adopted)
+            self.assertTrue(audio.is_file())
+            self.assertEqual(audio.stat().st_size, 500 * 1024)
+
+    def test_place_leaves_unmerged_dash_audio_in_place(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = Path(tmp) / "[-211437014_456248648].fdash_sep-11.m4a"
+            audio.write_bytes(b"a" * 1000)
+            placed = place_downloaded_file(
+                str(audio),
+                title="№ 761",
+                video_id="-211437014_456248648",
+                upload_date="20260911",
+            )
+            self.assertEqual(placed, str(audio))
+            self.assertEqual(list(Path(tmp).iterdir()), [audio])
+
 
 class OrphanPartialTests(unittest.TestCase):
     def test_sweep_keeps_active_and_manual_parts(self):
@@ -820,6 +880,8 @@ class OrphanPartialTests(unittest.TestCase):
             manual_done = root / "Elsewhere" / "clip.mp4"
             manual_part = root / "Elsewhere" / "clip.mp4.part"
             media = root / "Show" / "Keep me.mp4"
+            queued_audio = root / "Show" / "[-1_2].fdash_sep-11.m4a"
+            done_audio = root / "Show" / "[-9_9].fdash_sep-11.m4a"
             for path, payload in (
                 (finished, b"show"),
                 (done_part, b"x"),
@@ -830,6 +892,8 @@ class OrphanPartialTests(unittest.TestCase):
                 (manual_done, b"clip"),
                 (manual_part, b"x"),
                 (media, b"keep"),
+                (queued_audio, b"a" * 1000),
+                (done_audio, b"a" * 1000),
             ):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(payload)
@@ -847,6 +911,9 @@ class OrphanPartialTests(unittest.TestCase):
             self.assertTrue(finished.exists())
             self.assertTrue(media.exists())
             self.assertTrue(manual_done.exists())
+            self.assertTrue(queued_audio.exists())
+            self.assertFalse(done_audio.exists())
+            self.assertIn(str(done_audio), removed)
 
     def test_detects_data_blocks_error(self):
         self.assertTrue(
@@ -1276,6 +1343,45 @@ class IdleRenameTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertTrue(os.path.isfile(second_row.local_path))
             self.assertEqual(second_row.title, "Algebra")
+
+    def test_completed_dash_audio_returns_to_the_queue(self):
+        from app.models import Video
+        from app.scheduler import release_fragment_completions
+
+        with self.Session() as db:
+            broken = self._video(
+                db,
+                external_id="-211437014_456248648",
+                name="[-211437014_456248648].fdash_sep-11.m4a",
+                folder=self.root / "Shows",
+                title="№ 761",
+            )
+            kept = self._video(
+                db,
+                external_id="-1_9",
+                name="Lecture [-1_9]-2024-01-15.mp4",
+                folder=self.root / "Shows",
+                title="Lecture",
+                upload_date="20240115",
+            )
+            broken_id = broken.id
+            kept_id = kept.id
+            audio = broken.local_path
+
+        with patch("app.scheduler.SessionLocal", self.Session):
+            released = release_fragment_completions()
+
+        self.assertEqual(released, 1)
+        self.assertTrue(os.path.isfile(audio))
+        with self.Session() as db:
+            broken = db.get(Video, broken_id)
+            kept = db.get(Video, kept_id)
+            self.assertEqual(broken.status, "QUEUED")
+            self.assertIsNone(broken.local_path)
+            self.assertIsNone(broken.completed_at)
+            self.assertIsNotNone(broken.next_attempt_at)
+            self.assertEqual(kept.status, "COMPLETED")
+            self.assertTrue(kept.local_path.endswith("Lecture [-1_9]-2024-01-15.mp4"))
 
 
 def _norm_test_profile(value) -> str:

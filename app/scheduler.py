@@ -4,6 +4,7 @@ import asyncio
 import os
 import random
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.exc import InterfaceError, OperationalError
@@ -24,6 +25,7 @@ from .ytdlp import (
     download_video,
     format_upload_date,
     inspect_playlist_flat,
+    is_partial_download,
     is_usable_channel,
     is_usable_video_title,
     label_from_url,
@@ -887,6 +889,34 @@ _KEEP_PARTIAL_STATUSES = ("DOWNLOADING", "QUEUED", "FAILED_TEMPORARY", "PAUSED")
 _rename_settled: set[int] = set()
 
 
+def release_fragment_completions() -> int:
+    """Queue a download again when the saved file is only an unmerged stream.
+
+    VK throttles a transfer until it stops. The next attempt continues the same
+    parts. An audio piece such as [{id}].fdash_sep-11.m4a is not the video.
+    """
+    released = 0
+    with SessionLocal() as db:
+        jobs = db.scalars(
+            select(Video).where(
+                Video.status == "COMPLETED",
+                Video.local_path.is_not(None),
+            )
+        ).all()
+        for job in jobs:
+            if not is_partial_download(Path(job.local_path or "")):
+                continue
+            job.status = "QUEUED"
+            job.local_path = None
+            job.completed_at = None
+            job.last_error = None
+            job.next_attempt_at = now()
+            released += 1
+        if released:
+            db.commit()
+    return released
+
+
 async def sweep_orphan_partials() -> list[str]:
     """Remove leftover temps while nothing is downloading."""
     if not storage_ok():
@@ -1005,6 +1035,7 @@ async def scheduler_loop():
                 await scan_subscription(sub_id)
 
             await resolve_placeholder_queued_titles()
+            release_fragment_completions()
             downloaded = await run_one_download()
             if not downloaded:
                 await rename_one_completed_file()
