@@ -206,6 +206,16 @@ class SelfCheckTests(unittest.TestCase):
         self.assertIn("components", report)
         self.assertFalse(report["attention"])
 
+    def test_cached_only_does_not_probe(self):
+        with self.Session() as db, patch(
+            "app.selfcheck.collect_checks", side_effect=AssertionError("probe")
+        ), patch(
+            "app.selfcheck.fetch_latest_ytdlp", side_effect=AssertionError("github")
+        ):
+            report = load_selfcheck(db, cached_only=True)
+        self.assertEqual(report["components"], [])
+        self.assertFalse(report["ok"])
+
     def test_home_reuses_cached_components(self):
         cached = {
             "checked_at": "2026-09-18T10:00:00",

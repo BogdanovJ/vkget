@@ -6,8 +6,8 @@ import random
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import select
-from sqlalchemy.exc import InterfaceError, OperationalError
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError, InterfaceError, OperationalError
 
 from .config import settings
 from .db import SessionLocal, reset_pool
@@ -39,10 +39,48 @@ from .ytdlp import (
 def now():
     return datetime.now()
 
+
+def claim_download(db, video_id: int) -> int | None:
+    """Move one runnable row to DOWNLOADING.
+
+    Returns the new attempt count, or None when another worker already claimed it.
+    On MariaDB, SQLAlchemy sets CLIENT.FOUND_ROWS, so rowcount is rows matched.
+    On SQLite it is rows changed. The status filter makes either value 1 only
+    when this call won the claim.
+    """
+    result = db.execute(
+        update(Video)
+        .where(Video.id == video_id, Video.status.in_(RUNNABLE_STATUSES))
+        .values(
+            status="DOWNLOADING",
+            attempts=Video.attempts + 1,
+            next_attempt_at=None,
+        )
+        .execution_options(synchronize_session="fetch")
+    )
+    if result.rowcount != 1:
+        db.rollback()
+        return None
+    db.commit()
+    job = db.get(Video, video_id)
+    if not job or job.status != "DOWNLOADING":
+        return None
+    return job.attempts
+
+def _ordered_bounds(low: int, high: int) -> tuple[int, int]:
+    low = int(low)
+    high = int(high)
+    if low > high:
+        return high, low
+    return low, high
+
+
 def jitter_minutes(low: int, high: int):
+    low, high = _ordered_bounds(low, high)
     return timedelta(minutes=random.randint(low, high))
 
 def jitter_hours(low: int, high: int):
+    low, high = _ordered_bounds(low, high)
     return timedelta(minutes=random.randint(low * 60, high * 60))
 
 
@@ -367,7 +405,25 @@ def apply_newest_seen(sub: Subscription, seen: dict | None) -> None:
     sub.newest_video_title = title[:1000] or None
     sub.newest_video_at = seen.get("published")
 
+# One lock per subscription inside this process. k8s runs a single replica;
+# this does not coordinate scans across pods.
+_scan_locks: dict[int, asyncio.Lock] = {}
+
+
+def _scan_lock(subscription_id: int) -> asyncio.Lock:
+    lock = _scan_locks.get(subscription_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _scan_locks[subscription_id] = lock
+    return lock
+
+
 async def scan_subscription(subscription_id: int, initial: bool = False):
+    async with _scan_lock(subscription_id):
+        await _scan_subscription(subscription_id, initial=initial)
+
+
+async def _scan_subscription(subscription_id: int, initial: bool = False):
     with SessionLocal() as db:
         sub = db.get(Subscription, subscription_id)
         if not sub:
@@ -575,7 +631,11 @@ async def scan_subscription(subscription_id: int, initial: bool = False):
         for row in new_videos:
             row.pop("_recency", None)
             row.pop("_index", None)
-            db.add(Video(**row))
+            try:
+                with db.begin_nested():
+                    db.add(Video(**row))
+            except IntegrityError:
+                continue
         apply_newest_seen(sub, seen)
         sub.last_scan_at = scan_at
         sub.last_error = None
@@ -677,9 +737,14 @@ async def run_one_download() -> bool:
             set_global_cooldown(db, until)
             db.commit()
             await notify(
-                "⚠ VKGET\n"
-                "Download storage is unavailable or not writable.\n"
-                f"Paused until approximately {until:%Y-%m-%d %H:%M}."
+                "\n".join(
+                    [
+                        "*Paused*",
+                        "",
+                        "Download storage is unavailable or not writable.",
+                        f"Paused until approximately {until:%Y-%m-%d %H:%M}.",
+                    ]
+                )
             )
             return False
 
@@ -746,6 +811,8 @@ async def run_one_download() -> bool:
             job.local_path = adopted
             job.completed_at = now()
             job.last_error = None
+            db.commit()
+        with SessionLocal() as db:
             set_global_cooldown(
                 db,
                 now() + jitter_minutes(
@@ -768,14 +835,9 @@ async def run_one_download() -> bool:
         return True
 
     with SessionLocal() as db:
-        job = db.get(Video, video_id)
-        if not job or job.status not in RUNNABLE_STATUSES:
-            return False
-        job.status = "DOWNLOADING"
-        job.attempts += 1
-        attempts = job.attempts
-        job.next_attempt_at = None
-        db.commit()
+        attempts = claim_download(db, video_id)
+    if attempts is None:
+        return False
 
     try:
         rc, final_path, log = await download_with_vpn(
@@ -826,15 +888,16 @@ async def run_one_download() -> bool:
             job.local_path = final_path
             job.completed_at = now()
             job.last_error = None
-
-            set_global_cooldown(
-                db,
-                now() + jitter_minutes(
-                    settings.min_gap_minutes,
-                    settings.max_gap_minutes,
-                ),
-            )
             db.commit()
+            with SessionLocal() as later:
+                set_global_cooldown(
+                    later,
+                    now() + jitter_minutes(
+                        settings.min_gap_minutes,
+                        settings.max_gap_minutes,
+                    ),
+                )
+                later.commit()
 
             await notify(
                 format_video_notice(

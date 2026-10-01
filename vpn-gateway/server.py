@@ -23,7 +23,7 @@ OPENVPN_BIN = os.getenv("OPENVPN_BIN", "openvpn")
 WG_QUICK_BIN = os.getenv("WG_QUICK_BIN", "wg-quick")
 DEBUG = os.getenv("VPN_GATEWAY_DEBUG", "").strip().lower() in {"1", "true", "yes"}
 
-_lock = threading.Lock()
+_lock = threading.RLock()
 _state = {
     "connected": False,
     "type": None,
@@ -65,13 +65,16 @@ def _wg_down(workdir: str | None) -> None:
     conf = Path(workdir) / "wg0.conf"
     if not conf.exists():
         return
-    subprocess.run(
-        [WG_QUICK_BIN, "down", str(conf)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-        timeout=15,
-    )
+    try:
+        subprocess.run(
+            [WG_QUICK_BIN, "down", str(conf)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return
 
 
 def _cleanup_locked() -> None:
@@ -176,11 +179,21 @@ def _connect_openvpn(payload: dict) -> tuple[int, dict]:
         shutil.rmtree(workdir, ignore_errors=True)
         return 500, {"ok": False, "detail": f"failed to start OpenVPN: {exc}"}
 
+    with _lock:
+        _state.update({
+            "connected": False,
+            "type": "openvpn",
+            "endpoint_ip": payload.get("endpoint_ip"),
+            "detail": "connecting",
+            "workdir": workdir,
+            "proc": proc,
+            "iface": None,
+        })
+
     ok, detail = _wait_for_openvpn(proc, CONNECT_TIMEOUT)
     if not ok:
-        shutil.rmtree(workdir, ignore_errors=True)
         with _lock:
-            _state["detail"] = detail
+            _cleanup_locked()
         _log(detail)
         return 502, {"ok": False, "detail": detail}
     with _lock:
@@ -212,6 +225,16 @@ def _connect_wireguard(payload: dict) -> tuple[int, dict]:
     os.chmod(config_path, 0o600)
 
     _log("connecting profile type=wireguard")
+    with _lock:
+        _state.update({
+            "connected": False,
+            "type": "wireguard",
+            "endpoint_ip": payload.get("endpoint_ip"),
+            "detail": "connecting",
+            "workdir": workdir,
+            "proc": None,
+            "iface": "wg0",
+        })
     try:
         result = subprocess.run(
             [WG_QUICK_BIN, "up", str(config_path)],
@@ -221,13 +244,14 @@ def _connect_wireguard(payload: dict) -> tuple[int, dict]:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        shutil.rmtree(workdir, ignore_errors=True)
+        with _lock:
+            _cleanup_locked()
         detail = f"WireGuard failed: {exc}"
         _log(detail)
         return 502, {"ok": False, "detail": detail}
     if result.returncode != 0:
-        _wg_down(workdir)
-        shutil.rmtree(workdir, ignore_errors=True)
+        with _lock:
+            _cleanup_locked()
         detail = "WireGuard failed: " + (
             (result.stderr or result.stdout or "wg-quick up failed").strip()[-400:]
         )
@@ -242,8 +266,8 @@ def _connect_wireguard(payload: dict) -> tuple[int, dict]:
         timeout=5,
     )
     if show.returncode != 0:
-        _wg_down(workdir)
-        shutil.rmtree(workdir, ignore_errors=True)
+        with _lock:
+            _cleanup_locked()
         detail = "WireGuard failed: interface was not created"
         _log(detail)
         return 502, {"ok": False, "detail": detail}
@@ -261,6 +285,22 @@ def _connect_wireguard(payload: dict) -> tuple[int, dict]:
     _log("WireGuard connected")
     _log("SOCKS routing ready")
     return 200, {"ok": True, "connected": True, "type": "wireguard"}
+
+
+def connect_request(payload: dict) -> tuple[int, dict]:
+    """Replace the tunnel. The lock covers disconnect and connect together.
+
+    A failure clears proc, workdir, and connected so the next call is not stuck.
+    """
+    with _lock:
+        try:
+            _cleanup_locked()
+            return connect(payload)
+        except Exception as exc:
+            _cleanup_locked()
+            detail = f"{type(exc).__name__}: {exc}"
+            _log(f"connect failed: {detail}")
+            return 500, {"ok": False, "detail": detail, "connected": False}
 
 
 def connect(payload: dict) -> tuple[int, dict]:
@@ -328,8 +368,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(payload, dict):
                 self._send(400, {"ok": False, "detail": "invalid payload"})
                 return
-            disconnect()
-            code, body = connect(payload)
+            code, body = connect_request(payload)
             self._send(code, body)
             return
         self._send(404, {"ok": False, "detail": "not found"})

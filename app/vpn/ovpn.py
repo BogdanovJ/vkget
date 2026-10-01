@@ -186,15 +186,6 @@ def parse_remote(config_text: str) -> tuple[str | None, int | None, str | None]:
     return host, port, proto
 
 
-def config_uses_ip_remote(config_text: str, fallback_ip: str | None = None) -> bool:
-    host, _, _ = parse_remote(config_text)
-    if host and normalize_public_ipv4(host):
-        return True
-    if fallback_ip and host == fallback_ip:
-        return True
-    return False
-
-
 def _is_denied(directive: str) -> bool:
     return directive in DENIED_DIRECTIVES or directive.startswith("ifconfig-ipv6")
 

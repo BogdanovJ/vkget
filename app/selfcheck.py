@@ -407,8 +407,21 @@ def load_selfcheck(
     refresh: bool = False,
     fetch_if_needed: bool = False,
     live: bool = True,
+    cached_only: bool = False,
 ) -> dict:
     cache = _read_cache(db)
+    if cached_only:
+        components = cache.get("components") or []
+        return {
+            "checked_at": cache.get("checked_at") or "",
+            "latest_ytdlp": cache.get("latest_ytdlp") or "",
+            "latest_checked_at": cache.get("latest_checked_at") or "",
+            "latest_error": cache.get("latest_error") or "",
+            "components": components,
+            "ok": bool(cache.get("ok")),
+            "attention": bool(cache.get("attention")),
+            "ytdlp_update": bool(cache.get("ytdlp_update")),
+        }
     if refresh or (fetch_if_needed and not cache.get("latest_checked_at")):
         return run_selfcheck(db, refresh_latest=True)
     if not live and cache.get("components"):

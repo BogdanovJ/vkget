@@ -1,21 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime
-from urllib import request
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .config import settings
-from .db import ensure_schema, get_db, wait_for_database
+from .db import engine, ensure_schema, get_db, wait_for_database
 from .models import (
-    AppState,
     Subscription,
     Video,
     VpnProfile,
@@ -30,7 +30,9 @@ from .retention import (
     set_common_retention_days,
 )
 from .queue import (
+    ACTIVE_STATUSES,
     delete_from_queue,
+    download_in_progress,
     is_queue_paused,
     list_queue,
     move_queue_item,
@@ -81,9 +83,27 @@ from .ytdlp import (
     to_vkvideo,
 )
 
-app = FastAPI(title="VKGET")
-templates = Jinja2Templates(directory="app/templates")
-app.mount("/static", StaticFiles(directory="app/static"), name="static")
+_APP_DIR = Path(__file__).resolve().parent
+_VPN_BUSY = "A download is using the VPN."
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    prepare_download_share()
+    task = asyncio.create_task(_run_background())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+app = FastAPI(title="VKGET", lifespan=_lifespan)
+templates = Jinja2Templates(directory=str(_APP_DIR / "templates"))
+app.mount("/static", StaticFiles(directory=str(_APP_DIR / "static")), name="static")
 
 
 def format_stamp(value: datetime | None) -> str:
@@ -107,12 +127,6 @@ templates.env.filters["ago"] = format_ago
 templates.env.filters["status"] = status_label
 templates.env.filters["channel"] = shown_channel
 templates.env.filters["scanline"] = scan_result_line
-
-@app.on_event("startup")
-async def startup():
-    prepare_download_share()
-    asyncio.create_task(_run_background())
-
 
 async def _run_background():
     await wait_for_database(_init_database)
@@ -456,7 +470,9 @@ def delete_subscription(
     return RedirectResponse("/subscriptions", status_code=303)
 
 @app.post("/subscriptions/{sub_id}/scan")
-async def scan_now(sub_id: int):
+async def scan_now(sub_id: int, db: Session = Depends(get_db)):
+    if not db.get(Subscription, sub_id):
+        raise HTTPException(404)
     await scan_subscription(sub_id)
     return RedirectResponse(
         f"/subscriptions/{sub_id}",
@@ -472,17 +488,24 @@ async def force_download(
     if not video:
         raise HTTPException(404)
 
-    video.status = "QUEUED"
-    video.ignore_reason = None
-    video.next_attempt_at = datetime.now()
-    video.queue_rank = next_queue_rank(db)
+    subscription_id = video.subscription_id
+    target = (
+        f"/subscriptions/{subscription_id}"
+        if subscription_id
+        else "/queue"
+    )
+    if video.status == "DOWNLOADING":
+        set_queue_flash(db, f"Already downloading: {video.display_title()}")
+        return RedirectResponse(target, status_code=303)
+    if not retry_now(db, video):
+        set_queue_flash(db, "Already downloading")
+        return RedirectResponse(target, status_code=303)
+
     webpage_url = video.webpage_url
     current_title = video.title
     current_channel = video.channel
     current_date = video.upload_date
     external_id = video.external_id
-    subscription_id = video.subscription_id
-    db.commit()
 
     meta = await resolve_video_metadata(
         webpage_url,
@@ -501,11 +524,6 @@ async def force_download(
             video.upload_date = meta["upload_date"]
         db.commit()
 
-    target = (
-        f"/subscriptions/{subscription_id}"
-        if subscription_id
-        else "/queue"
-    )
     return RedirectResponse(target, status_code=303)
 
 @app.post("/videos/{video_id}/ignore")
@@ -554,15 +572,29 @@ def queue_resume(db: Session = Depends(get_db)):
     return RedirectResponse("/queue", status_code=303)
 
 
+def _queue_refusal(video: Video | None, *, downloading: str) -> str:
+    if video and video.status == "DOWNLOADING":
+        return downloading
+    return "Not in the queue"
+
+
 @app.post("/queue/videos/{video_id}/up")
 def queue_move_up(video_id: int, db: Session = Depends(get_db)):
-    move_queue_item(db, video_id, -1)
+    video = db.get(Video, video_id)
+    if not video or video.status not in ACTIVE_STATUSES:
+        set_queue_flash(db, "Not in the queue")
+    else:
+        move_queue_item(db, video_id, -1)
     return RedirectResponse("/queue", status_code=303)
 
 
 @app.post("/queue/videos/{video_id}/down")
 def queue_move_down(video_id: int, db: Session = Depends(get_db)):
-    move_queue_item(db, video_id, 1)
+    video = db.get(Video, video_id)
+    if not video or video.status not in ACTIVE_STATUSES:
+        set_queue_flash(db, "Not in the queue")
+    else:
+        move_queue_item(db, video_id, 1)
     return RedirectResponse("/queue", status_code=303)
 
 
@@ -571,7 +603,8 @@ def queue_retry_now(video_id: int, db: Session = Depends(get_db)):
     video = db.get(Video, video_id)
     if not video:
         raise HTTPException(404)
-    retry_now(db, video)
+    if not retry_now(db, video):
+        set_queue_flash(db, _queue_refusal(video, downloading="Already downloading"))
     return RedirectResponse("/queue", status_code=303)
 
 
@@ -580,7 +613,8 @@ def queue_pause_item(video_id: int, db: Session = Depends(get_db)):
     video = db.get(Video, video_id)
     if not video:
         raise HTTPException(404)
-    pause_item(db, video)
+    if not pause_item(db, video):
+        set_queue_flash(db, _queue_refusal(video, downloading="Already downloading"))
     return RedirectResponse("/queue", status_code=303)
 
 
@@ -589,7 +623,8 @@ def queue_resume_item(video_id: int, db: Session = Depends(get_db)):
     video = db.get(Video, video_id)
     if not video:
         raise HTTPException(404)
-    resume_item(db, video)
+    if not resume_item(db, video):
+        set_queue_flash(db, "Not in the queue")
     return RedirectResponse("/queue", status_code=303)
 
 
@@ -598,7 +633,8 @@ def queue_delete_item(video_id: int, db: Session = Depends(get_db)):
     video = db.get(Video, video_id)
     if not video:
         raise HTTPException(404)
-    delete_from_queue(db, video)
+    if not delete_from_queue(db, video):
+        set_queue_flash(db, _queue_refusal(video, downloading="Already downloading"))
     return RedirectResponse("/queue", status_code=303)
 
 
@@ -620,7 +656,7 @@ def system_check_now(db: Session = Depends(get_db)):
 
 @app.get("/api/system")
 def api_system(db: Session = Depends(get_db)):
-    return load_selfcheck(db)
+    return load_selfcheck(db, cached_only=True)
 
 def _form_bool(value: str | None) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
@@ -658,6 +694,9 @@ def vpn_enable_form(db: Session = Depends(get_db)):
 
 @app.post("/vpn/disable")
 async def vpn_disable_form(db: Session = Depends(get_db)):
+    if download_in_progress(db):
+        set_flash(db, _VPN_BUSY)
+        return RedirectResponse("/vpn", status_code=303)
     await manager.disconnect()
     set_vpn_enabled(db, False)
     return RedirectResponse("/vpn", status_code=303)
@@ -673,7 +712,10 @@ def vpn_fallback_form(
 
 
 @app.post("/vpn/disconnect")
-async def vpn_disconnect_form():
+async def vpn_disconnect_form(db: Session = Depends(get_db)):
+    if download_in_progress(db):
+        set_flash(db, _VPN_BUSY)
+        return RedirectResponse("/vpn", status_code=303)
     await manager.disconnect()
     return RedirectResponse("/vpn", status_code=303)
 
@@ -831,6 +873,9 @@ async def vpn_delete_profile(profile_id: int, db: Session = Depends(get_db)):
     row = db.get(VpnProfile, profile_id)
     if not row:
         raise HTTPException(404)
+    if row.is_default and download_in_progress(db):
+        set_flash(db, _VPN_BUSY)
+        return RedirectResponse("/vpn", status_code=303)
     if row.is_default:
         await manager.disconnect()
     delete_profile(db, row)
@@ -916,6 +961,8 @@ async def api_vpn_delete(profile_id: int, db: Session = Depends(get_db)):
     row = db.get(VpnProfile, profile_id)
     if not row:
         raise HTTPException(404)
+    if row.is_default and download_in_progress(db):
+        raise HTTPException(409, _VPN_BUSY)
     if row.is_default:
         await manager.disconnect()
     delete_profile(db, row)
@@ -934,6 +981,8 @@ async def api_vpn_connect(profile_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404)
     if not row.enabled:
         raise HTTPException(400, "profile is disabled")
+    if download_in_progress(db):
+        raise HTTPException(409, _VPN_BUSY)
     set_selected_profile(db, row.id)
     result = await manager.connect(row)
     if not result.ok:
@@ -942,7 +991,9 @@ async def api_vpn_connect(profile_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/api/vpn/disconnect")
-async def api_vpn_disconnect():
+async def api_vpn_disconnect(db: Session = Depends(get_db)):
+    if download_in_progress(db):
+        raise HTTPException(409, _VPN_BUSY)
     await manager.disconnect()
     return {"ok": True, "connected": False}
 
@@ -955,6 +1006,8 @@ def api_vpn_enable(db: Session = Depends(get_db)):
 
 @app.post("/api/vpn/disable")
 async def api_vpn_disable(db: Session = Depends(get_db)):
+    if download_in_progress(db):
+        raise HTTPException(409, _VPN_BUSY)
     await manager.disconnect()
     set_vpn_enabled(db, False)
     return {"ok": True, "enabled": False}
@@ -964,7 +1017,9 @@ async def _test_profile(profile_id: int, db: Session):
     row = db.get(VpnProfile, profile_id)
     if not row:
         raise HTTPException(404)
-    result = await manager.connect_and_probe(row)
+    if download_in_progress(db):
+        return {"ok": False, "detail": _VPN_BUSY}
+    result = await manager.connect_and_probe(row, count_failure=False)
     await manager.disconnect()
     if result.ok and result.geo:
         return {
@@ -978,4 +1033,14 @@ async def _test_profile(profile_id: int, db: Session):
 
 @app.get("/healthz")
 def healthz():
+    return {"ok": True}
+
+
+@app.get("/readyz")
+def readyz():
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception:
+        raise HTTPException(503, "database unavailable")
     return {"ok": True}

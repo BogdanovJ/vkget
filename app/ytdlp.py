@@ -360,11 +360,15 @@ def download_stem(
     suffix = f" [{vid}]"
     if date_part:
         suffix = f"{suffix}-{date_part}"
-    max_stem = 251
-    room = max_stem - len(suffix)
-    if len(name) > room:
-        name = name[: max(16, room)].rstrip(" .") or "Untitled"
-    return f"{name}{suffix}"[:max_stem]
+    # yt-dlp writes "{stem}.%(ext)s" before the real extension replaces it.
+    template_extra = len(".%(ext)s".encode("utf-8"))
+    room = 255 - template_extra - len(suffix.encode("utf-8"))
+    name = truncate_utf8(name, max(1, room)).rstrip(" .") or "Untitled"
+    stem = f"{name}{suffix}"
+    while len((stem + ".%(ext)s").encode("utf-8")) > 255 and name:
+        name = truncate_utf8(name, len(name.encode("utf-8")) - 1).rstrip(" .")
+        stem = f"{name}{suffix}" if name else suffix.strip()
+    return stem
 
 
 def dated_filename(path: str, video_id: str) -> bool:
@@ -1369,12 +1373,24 @@ async def inspect_playlist_flat(url: str) -> dict:
     return await _try_hosts_json(scan_url_candidates(url), extra, 180)
 
 
+def truncate_utf8(value: str, max_bytes: int) -> str:
+    """Cut on a character boundary so the UTF-8 encoding fits in max_bytes."""
+    if max_bytes < 1:
+        return ""
+    raw = value.encode("utf-8")
+    if len(raw) <= max_bytes:
+        return value
+    return raw[:max_bytes].decode("utf-8", errors="ignore")
+
+
 def safe_component(value: str, *, default: str = "Unknown") -> str:
     value = (value or default).strip()
     value = re.sub(r'[\/\\:*?"<>|%$]', "_", value)
     value = re.sub(r"[\x00-\x1f]", "", value)
     value = re.sub(r"\s+", " ", value)
-    return value[:180].strip(" .") or default
+    # NAME_MAX is 255 bytes. Keep folder names shorter than that.
+    value = truncate_utf8(value, 180).strip(" .")
+    return value or default
 
 
 def download_format(max_height: int) -> str:
@@ -1391,7 +1407,6 @@ def download_format(max_height: int) -> str:
             f"best[ext=mp4][height<={h}]",
             f"bestvideo[height<={h}]+bestaudio",
             f"best[height<={h}]",
-            "best",
         ]
     )
 

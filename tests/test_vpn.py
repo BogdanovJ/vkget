@@ -7,13 +7,13 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
 from app.models import VpnProfile
 from app.vpn.ovpn import OvpnError, sanitize_ovpn
-from app.vpn.profiles import create_profile, delete_profile, update_profile
+from app.vpn.profiles import ProfileError, create_profile, delete_profile, update_profile
 from app.vpn.runtime import download_with_vpn
 from app.vpn.settings import is_vpn_enabled, selected_profile, set_vpn_enabled
 from app.vpn.wireguard import WireGuardError, sanitize_wireguard
@@ -152,6 +152,27 @@ class ProfileTests(VpnCase):
             row = create_profile(db, name="Off", vpn_type="openvpn", config_text=VALID_OVPN)
             update_profile(db, row, enabled=False)
             self.assertIsNone(selected_profile(db))
+
+    def test_disabling_another_profile_keeps_the_selected_one(self):
+        with self.Session() as db:
+            selected = create_profile(
+                db, name="Selected", vpn_type="openvpn", config_text=VALID_OVPN, is_default=True
+            )
+            other = create_profile(db, name="Other", vpn_type="wireguard", config_text=VALID_WG)
+            update_profile(db, other, enabled=False)
+            self.assertEqual(selected_profile(db).id, selected.id)
+            self.assertTrue(db.get(VpnProfile, selected.id).is_default)
+
+    def test_type_change_rejects_a_config_for_the_old_type(self):
+        with self.Session() as db:
+            row = create_profile(db, name="WG", vpn_type="wireguard", config_text=VALID_WG)
+            stored = row.config_text
+            with self.assertRaises(ProfileError):
+                update_profile(db, row, vpn_type="openvpn")
+            db.rollback()
+            fresh = db.get(VpnProfile, row.id)
+            self.assertEqual(fresh.vpn_type, "wireguard")
+            self.assertEqual(fresh.config_text, stored)
 
 
 class ValidationTests(unittest.TestCase):
@@ -312,6 +333,35 @@ class DownloadFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(path)
         self.assertIn("down", log)
 
+    async def test_internal_typeerror_does_not_retry_direct(self):
+        calls: list[str] = []
+        profile = SimpleNamespace(
+            id=1,
+            name="Russian VPS",
+            vpn_type="openvpn",
+            enabled=True,
+            config_text="config",
+            fallback_to_direct=True,
+        )
+
+        async def download(url, channel, proxy=None):
+            calls.append(proxy or "direct")
+            raise TypeError("bad format string")
+
+        with patch("app.vpn.runtime.is_vpn_enabled", return_value=True), patch(
+            "app.vpn.runtime.selected_profile", return_value=profile
+        ), patch("app.vpn.runtime.fallback_to_direct", return_value=True), patch(
+            "app.vpn.runtime.SessionLocal", _session_with(profile)
+        ), patch(
+            "app.vpn.runtime.manager.connect",
+            new=AsyncMock(return_value=SimpleNamespace(ok=True, detail="connected")),
+        ), patch("app.vpn.runtime.manager.disconnect", new=AsyncMock()), patch(
+            "app.vpn.runtime.proxy_url", return_value="socks5://vpn-gateway:1080"
+        ):
+            with self.assertRaises(TypeError):
+                await download_with_vpn(download, "https://vk.com/video-1_2", "ch")
+        self.assertEqual(calls, ["socks5://vpn-gateway:1080"])
+
     async def test_no_profile_falls_back(self):
         calls: list[str] = []
 
@@ -378,6 +428,39 @@ class GatewayTests(unittest.TestCase):
         self.assertFalse(write_http_body(reset, b"{}"))
         written = []
         self.assertTrue(write_http_body(written.append, b"ok"))
+
+    def test_failed_connect_releases_the_lock_and_clears_state(self):
+        from server import _lock, _state, connect_request
+
+        class _Proc:
+            def poll(self):
+                return None
+
+            def terminate(self):
+                return None
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                return None
+
+        def boom(_payload):
+            _state["connected"] = True
+            _state["proc"] = _Proc()
+            _state["workdir"] = "/tmp/vkget-should-not-remain"
+            _state["type"] = "openvpn"
+            raise RuntimeError("connect exploded")
+
+        with patch("server.connect", side_effect=boom):
+            code, body = connect_request({"type": "openvpn", "config": "x"})
+        self.assertEqual(code, 500)
+        self.assertFalse(body["ok"])
+        self.assertFalse(_state["connected"])
+        self.assertIsNone(_state["proc"])
+        self.assertIsNone(_state["workdir"])
+        self.assertTrue(_lock.acquire(blocking=False))
+        _lock.release()
 
     def test_connect_rejects_unknown_type(self):
         from server import connect

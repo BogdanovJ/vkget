@@ -15,6 +15,7 @@ from app.ytdlp import (
     download_folder_name,
     download_format,
     download_stem,
+    safe_component,
     download_url_candidates,
     ffmpeg_tv_args,
     format_upload_date,
@@ -513,8 +514,15 @@ class DownloadPathTests(unittest.TestCase):
 
     def test_long_filename_stays_under_limit(self):
         stem = download_stem("A" * 400, "-1_2", "20240115")
+        self.assertLessEqual(len((stem + ".%(ext)s").encode()), 255)
         self.assertLessEqual(len(stem) + len(".mp4"), 255)
         self.assertTrue(stem.endswith("[-1_2]-2024-01-15"))
+        cyrillic = "Лекция " + "я" * 180
+        cyr_stem = download_stem(cyrillic, "-214484275_456239461", "20240115")
+        self.assertLessEqual(len((cyr_stem + ".%(ext)s").encode()), 255)
+        self.assertLessEqual(len((cyr_stem + ".mp4").encode()), 255)
+        folder = safe_component(cyrillic)
+        self.assertLessEqual(len(folder.encode()), 255)
 
     def test_dated_filename_requires_trailing_date(self):
         self.assertTrue(
@@ -1005,6 +1013,8 @@ class TvCompatibleTests(unittest.TestCase):
         avc_at = fmt.find("vcodec^=avc")
         any_at = fmt.find("bestvideo[height<=720]+bestaudio")
         self.assertLess(avc_at, any_at)
+        self.assertTrue(fmt.endswith("best[height<=720]"))
+        self.assertFalse(fmt.endswith("/best"))
 
     def test_plan_copies_tv_safe_h264_aac_lc(self):
         probe = tv_probe()
@@ -1066,19 +1076,6 @@ class TvCompatibleTests(unittest.TestCase):
         self.assertFalse(plan["copy_video"])
         self.assertTrue(plan["copy_audio"])
 
-    def test_library_paths_skip_temps_and_hidden(self):
-        from pathlib import Path
-
-        from app.ytdlp import is_library_media_path
-
-        self.assertTrue(is_library_media_path(Path("/downloads/show/talk.mp4")))
-        self.assertTrue(is_library_media_path(Path("/downloads/show/talk.webm")))
-        self.assertFalse(is_library_media_path(Path("/downloads/show/.vkget-share")))
-        self.assertFalse(is_library_media_path(Path("/downloads/show/talk.mp4.part")))
-        self.assertFalse(is_library_media_path(Path("/downloads/show/talk.compat.mp4")))
-        self.assertFalse(is_library_media_path(Path("/downloads/show/.hidden.mp4")))
-
-
 class TvCompatibleEncodeTests(unittest.IsolatedAsyncioTestCase):
     async def test_transcodes_mpeg4_mp2_to_h264_aac(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1121,7 +1118,6 @@ class TvCompatibleEncodeTests(unittest.IsolatedAsyncioTestCase):
     async def test_skips_already_tv_ready_library_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             good = os.path.join(tmp, "good.mp4")
-            bad = os.path.join(tmp, "bad.mp4")
             self.assertEqual(
                 await asyncio_run_ffmpeg(
                     [
@@ -1158,47 +1154,14 @@ class TvCompatibleEncodeTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 0,
             )
-            self.assertEqual(
-                await asyncio_run_ffmpeg(
-                    [
-                        "ffmpeg",
-                        "-y",
-                        "-f",
-                        "lavfi",
-                        "-i",
-                        "testsrc=size=160x120:rate=5:duration=1",
-                        "-f",
-                        "lavfi",
-                        "-i",
-                        "sine=frequency=1000:duration=1",
-                        "-c:v",
-                        "mpeg4",
-                        "-c:a",
-                        "mp2",
-                        bad,
-                    ]
-                ),
-                0,
-            )
-            from app.ytdlp import (
-                ensure_tv_compatible,
-                iter_library_media,
-                next_library_tv_rewrite,
-                probe_media,
-                reset_library_tv_failures,
-            )
+            from app.ytdlp import ensure_tv_compatible, probe_media
 
-            reset_library_tv_failures()
             probe = await probe_media(good)
             self.assertTrue(is_tv_ready(probe, good))
             before = os.stat(good).st_mtime_ns
             same = await ensure_tv_compatible(good, force_remux=False)
             self.assertEqual(same, good)
             self.assertEqual(os.stat(good).st_mtime_ns, before)
-            found = [str(path) for path in iter_library_media(tmp)]
-            self.assertEqual(found, [bad, good])
-            picked = await next_library_tv_rewrite(tmp)
-            self.assertEqual(picked, bad)
 
 
 class IdleRenameTests(unittest.IsolatedAsyncioTestCase):
